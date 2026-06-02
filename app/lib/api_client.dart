@@ -4,6 +4,7 @@ import 'package:http/http.dart' as http;
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'config.dart';
+import 'generated/protocol.dart';
 
 /// Thin REST + WebSocket client for the AudioZones server. Commands go over REST;
 /// state arrives as full snapshots over the WebSocket (snapshot-only protocol).
@@ -22,6 +23,23 @@ class ApiClient {
 
   Future<void> deactivate(String zone) => _send(
       http.post(_uri('/zones/${_enc(zone)}/deactivate'), headers: _headers));
+
+  /// Create a new (inactive) zone from a name and its links. The server rejects an empty
+  /// name (400), no links (400), or a duplicate name (409); `_send` surfaces those.
+  Future<void> createZone(String name, List<LinkView> links) => _send(http.post(
+        _uri('/zones'),
+        headers: _headers,
+        body: jsonEncode({
+          'name': name,
+          'links': [
+            for (final l in links)
+              {'output_port': l.outputPort, 'input_port': l.inputPort}
+          ],
+        }),
+      ));
+
+  Future<void> deleteZone(String name) =>
+      _send(http.delete(_uri('/zones/${_enc(name)}'), headers: _headers));
 
   Future<void> setVolume(String nodeKey, double volume, bool muted) => _send(http.put(
         _uri('/nodes/${_enc(nodeKey)}/volume'),

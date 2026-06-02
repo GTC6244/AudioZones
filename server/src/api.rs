@@ -15,7 +15,7 @@ use axum::{
     http::{header, StatusCode},
     middleware::{self, Next},
     response::Response,
-    routing::{get, post, put},
+    routing::{delete, get, post, put},
     Json, Router,
 };
 use serde::Deserialize;
@@ -24,7 +24,7 @@ use tokio::sync::broadcast;
 use crate::backend::PwBackend;
 use crate::model::{self, Action, VolumeTarget};
 use crate::wire::{GraphState, ZoneView};
-use crate::zones::ZoneStore;
+use crate::zones::{LinkSpec, ZoneDef, ZoneError, ZoneStore};
 
 pub struct AppState {
     pub backend: Arc<dyn PwBackend>,
@@ -92,7 +92,8 @@ pub fn reconcile_and_apply(state: &AppState) {
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/graph", get(get_graph))
-        .route("/zones", get(get_zones))
+        .route("/zones", get(get_zones).post(create_zone))
+        .route("/zones/:name", delete(delete_zone))
         .route("/zones/:name/activate", post(activate))
         .route("/zones/:name/deactivate", post(deactivate))
         .route("/nodes/:key/volume", put(set_volume))
@@ -144,6 +145,64 @@ async fn get_graph(State(s): State<Arc<AppState>>) -> Json<GraphState> {
 
 async fn get_zones(State(s): State<Arc<AppState>>) -> Json<Vec<ZoneView>> {
     Json(compose(&s).zones)
+}
+
+#[derive(Deserialize)]
+struct CreateZoneBody {
+    name: String,
+    links: Vec<LinkBody>,
+}
+
+/// Create a new (inactive) zone from a name + its links. The client toggles it on
+/// afterward via `/activate`. Volumes aren't set here — a zone with links auto-derives
+/// its representative volume node from the first link's sink (see `ZoneDef::primary_node`).
+async fn create_zone(
+    State(s): State<Arc<AppState>>,
+    Json(body): Json<CreateZoneBody>,
+) -> Result<Json<Vec<ZoneView>>, ApiError> {
+    if body.links.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "a zone needs at least one link".into()));
+    }
+    let zone = ZoneDef {
+        name: body.name,
+        links: body
+            .links
+            .into_iter()
+            .map(|l| LinkSpec { output_port: l.output_port, input_port: l.input_port })
+            .collect(),
+        volumes: Vec::new(),
+    };
+    {
+        let mut store = s.zones.lock().unwrap();
+        store.add_zone(zone).map_err(|e| match e {
+            ZoneError::ZoneExists(_) => (StatusCode::CONFLICT, e.to_string()),
+            ZoneError::InvalidZone(_) => (StatusCode::BAD_REQUEST, e.to_string()),
+            other => (StatusCode::INTERNAL_SERVER_ERROR, other.to_string()),
+        })?;
+        store
+            .save()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+    // New zone is inactive, so nothing to reconcile — just push the updated list.
+    publish(&s);
+    Ok(Json(compose(&s).zones))
+}
+
+async fn delete_zone(
+    State(s): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> Result<Json<Vec<ZoneView>>, ApiError> {
+    {
+        let mut store = s.zones.lock().unwrap();
+        store
+            .remove_zone(&name)
+            .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
+        store
+            .save()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+    publish(&s);
+    Ok(Json(compose(&s).zones))
 }
 
 async fn activate(State(s): State<Arc<AppState>>, Path(name): Path<String>) -> Result<Json<Vec<ZoneView>>, ApiError> {

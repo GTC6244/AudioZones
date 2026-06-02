@@ -93,6 +93,12 @@ class AppState extends ChangeNotifier {
     return api.setVolume(key, z.volume ?? 1.0, !z.muted);
   }
 
+  // Zone CRUD. The new zone is inactive; the next snapshot brings its (Off) tile.
+  Future<void> createZone(String name, List<LinkView> links) =>
+      api.createZone(name, links);
+
+  Future<void> deleteZone(ZoneView z) => api.deleteZone(z.name);
+
   Future<void> createLink(String outputPort, String inputPort) =>
       api.createLink(outputPort, inputPort);
 

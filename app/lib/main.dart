@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'api_client.dart';
 import 'app_state.dart';
 import 'config.dart';
+import 'screens/create_zone_screen.dart';
 import 'screens/graph_screen.dart';
 import 'screens/zones_screen.dart';
 import 'theme.dart';
@@ -60,6 +61,18 @@ class _HomeShellState extends State<HomeShell> {
             bottom: _connectionBanner(s),
           ),
           body: body,
+          // The "+" lives on the Zones tab only — Graph has its own tap-to-link flow.
+          floatingActionButton: _tab == 0
+              ? FloatingActionButton(
+                  tooltip: 'New zone',
+                  onPressed: () => Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => CreateZoneScreen(state: s),
+                    ),
+                  ),
+                  child: const Icon(Icons.add),
+                )
+              : null,
           bottomNavigationBar: NavigationBar(
             selectedIndex: _tab,
             onDestinationSelected: (i) => setState(() => _tab = i),
