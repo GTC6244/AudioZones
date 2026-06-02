@@ -82,9 +82,24 @@ pub fn reconcile(desired: &Desired, actual: &GraphState) -> Vec<Action> {
         .map(|l| (l.output_port.clone(), l.input_port.clone()))
         .collect();
 
-    // Create desired links that don't exist yet.
+    // Ports that actually exist right now. A desired link is only creatable once BOTH
+    // its endpoints are present — otherwise the backend can't resolve the keys and would
+    // just log "unknown port key(s)". Gating here means reconcile is safe to run on every
+    // graph change: during the startup burst (ports arriving one at a time) we stay quiet,
+    // then create the link the moment both endpoints appear (auto-reapply, no warnings).
+    let present_ports: BTreeSet<&str> = actual
+        .nodes
+        .iter()
+        .filter(|n| n.present)
+        .flat_map(|n| n.ports.iter().map(|p| p.key.as_str()))
+        .collect();
+
+    // Create desired links whose endpoints both exist and aren't already linked.
     for (out, inp) in &desired.links {
-        if !actual_links.contains(&(out.clone(), inp.clone())) {
+        if !actual_links.contains(&(out.clone(), inp.clone()))
+            && present_ports.contains(out.as_str())
+            && present_ports.contains(inp.as_str())
+        {
             actions.push(Action::CreateLink {
                 output_port: out.clone(),
                 input_port: inp.clone(),
@@ -212,12 +227,37 @@ mod tests {
     fn reconcile_creates_missing_link() {
         let store = store_with_active_patio();
         let desired = desired_from_active(&store);
-        let actual = GraphState::default(); // no links yet
+        // Both endpoint ports are present, no link yet -> create it.
+        let actual = GraphState {
+            nodes: vec![
+                node("src", None, true, vec![port("OUT", Direction::Out)]),
+                node("amp", None, true, vec![port("IN", Direction::In)]),
+            ],
+            ..Default::default()
+        };
         let actions = reconcile(&desired, &actual);
         assert!(actions.contains(&Action::CreateLink {
             output_port: "OUT".into(),
             input_port: "IN".into()
         }));
+    }
+
+    #[test]
+    fn reconcile_skips_link_when_a_port_is_absent() {
+        // The boot-race guard: a desired link whose endpoints haven't appeared yet must
+        // NOT be emitted (the backend can't resolve the keys -> "unknown port key" spam).
+        let store = store_with_active_patio();
+        let desired = desired_from_active(&store);
+        // Only OUT present; IN's node hasn't been announced yet.
+        let actual = GraphState {
+            nodes: vec![node("src", None, true, vec![port("OUT", Direction::Out)])],
+            ..Default::default()
+        };
+        let actions = reconcile(&desired, &actual);
+        assert!(
+            !actions.iter().any(|a| matches!(a, Action::CreateLink { .. })),
+            "should not create a link while an endpoint is absent, got {actions:?}"
+        );
     }
 
     #[test]
