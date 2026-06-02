@@ -67,6 +67,15 @@
         "present"
       ],
       "properties": {
+        "channel_volumes": {
+          "description": "Raw-linear per-channel volumes in the node's channel order (empty if no volume control). Lets a client show/drive individual channels (e.g. \"card ch 7-8 -> patio\").",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "float"
+          }
+        },
         "key": {
           "description": "Stable key: `(node.name, media.class)[+serial]`. Survives reconnect; numeric PipeWire ids do not. See `identity`.",
           "type": "string"
@@ -91,7 +100,7 @@
           "type": "boolean"
         },
         "volume": {
-          "description": "0.0..=1.0. `None` if this node has no volume control.",
+          "description": "Representative level, 0.0..=1.0 (the max across channels). `None` if this node has no volume control. For a one-knob UI; per-channel detail lives in `channel_volumes`.",
           "type": [
             "number",
             "null"
@@ -126,6 +135,7 @@
         "active",
         "degraded",
         "missing",
+        "muted",
         "name"
       ],
       "properties": {
@@ -143,8 +153,27 @@
             "type": "string"
           }
         },
+        "muted": {
+          "description": "Live mute state of `volume_node` (false when there's no volume node).",
+          "type": "boolean"
+        },
         "name": {
           "type": "string"
+        },
+        "volume": {
+          "description": "Live representative volume (0.0..=1.0) of `volume_node`, if that node is present. `None` -> the tile shows no slider (node absent or zone has no volume node).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
+        },
+        "volume_node": {
+          "description": "The zone's representative node — the sink whose volume the zone tile controls (the first volume-spec node, else the sink behind the zone's first link). `None` when the zone has no controllable node. Clients PUT volume changes to this key.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       }
     }

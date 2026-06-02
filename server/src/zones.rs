@@ -29,11 +29,28 @@ pub struct LinkSpec {
     pub input_port: String,
 }
 
-/// Desired volume for a node inside a zone.
+/// One channel's desired level, addressed by 0-based channel index in the node's
+/// channel order. Lets a zone drive a subset of a multi-channel card (e.g. an 8-ch
+/// USB card's channels 6-7 -> the patio amp) without touching the others.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ChannelVolume {
+    pub channel: usize,
+    pub volume: f32,
+}
+
+/// Desired volume for a node inside a zone. Two modes:
+///  - uniform: `volume = 0.6` applies one level to every channel (the common case);
+///  - per-channel: `channels = [{channel=6, volume=0.6}, ...]` drives specific channels
+///    and leaves the rest untouched. `channels` takes precedence when non-empty.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VolumeSpec {
     pub node_key: String,
-    pub volume: f32,
+    /// Uniform level for all channels. Optional so a spec can be per-channel only.
+    #[serde(default)]
+    pub volume: Option<f32>,
+    /// Per-channel overrides; when non-empty these win over `volume`.
+    #[serde(default)]
+    pub channels: Vec<ChannelVolume>,
     #[serde(default)]
     pub muted: bool,
 }
@@ -45,6 +62,20 @@ pub struct ZoneDef {
     pub links: Vec<LinkSpec>,
     #[serde(default)]
     pub volumes: Vec<VolumeSpec>,
+}
+
+impl ZoneDef {
+    /// The node whose volume the zone tile controls: the first volume-spec's node, else
+    /// the sink behind the zone's first link (the input-port side). `None` if neither
+    /// exists. The sink node key is the prefix of the input port key before `#`.
+    pub fn primary_node(&self) -> Option<String> {
+        if let Some(v) = self.volumes.first() {
+            return Some(v.node_key.clone());
+        }
+        let port = &self.links.first()?.input_port;
+        let nk = port.split('#').next().unwrap_or(port);
+        Some(nk.to_string())
+    }
 }
 
 const CURRENT_VERSION: u32 = 1;
@@ -154,7 +185,8 @@ mod tests {
             }],
             volumes: vec![VolumeSpec {
                 node_key: "Audio/Sink|Amp".into(),
-                volume: 0.6,
+                volume: Some(0.6),
+                channels: vec![],
                 muted: false,
             }],
         });
@@ -165,6 +197,58 @@ mod tests {
         assert_eq!(reloaded.zones.len(), 1);
         assert!(reloaded.is_active("patio"));
         assert_eq!(reloaded.zones[0].links.len(), 1);
+        assert_eq!(reloaded.zones[0].volumes[0].volume, Some(0.6));
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn primary_node_prefers_volume_spec_then_link_sink() {
+        // A volume spec wins outright.
+        let z = ZoneDef {
+            name: "z".into(),
+            links: vec![LinkSpec { output_port: "Audio/Source|Cap#out:cap_FL".into(), input_port: "Audio/Sink|Amp#in:playback_FL".into() }],
+            volumes: vec![VolumeSpec { node_key: "Audio/Sink|Amp".into(), volume: Some(0.5), channels: vec![], muted: false }],
+        };
+        assert_eq!(z.primary_node().as_deref(), Some("Audio/Sink|Amp"));
+
+        // No volume spec -> derive the sink node from the first link's input port.
+        let z2 = ZoneDef {
+            name: "z2".into(),
+            links: vec![LinkSpec { output_port: "Audio/Source|Cap#out:cap_FL".into(), input_port: "Audio/Sink|Patio Amp#in:playback_FL".into() }],
+            volumes: vec![],
+        };
+        assert_eq!(z2.primary_node().as_deref(), Some("Audio/Sink|Patio Amp"));
+
+        // Nothing to control.
+        let z3 = ZoneDef { name: "z3".into(), links: vec![], volumes: vec![] };
+        assert_eq!(z3.primary_node(), None);
+    }
+
+    #[test]
+    fn per_channel_volume_round_trips() {
+        let p = tmpfile("perchannel");
+        let mut store = ZoneStore::load(&p).unwrap();
+        store.zones.push(ZoneDef {
+            name: "patio".into(),
+            links: vec![],
+            volumes: vec![VolumeSpec {
+                node_key: "Audio/Sink|8ch Card".into(),
+                volume: None,
+                channels: vec![
+                    ChannelVolume { channel: 6, volume: 0.6 },
+                    ChannelVolume { channel: 7, volume: 0.6 },
+                ],
+                muted: false,
+            }],
+        });
+        store.save().unwrap();
+        let reloaded = ZoneStore::load(&p).unwrap();
+        let v = &reloaded.zones[0].volumes[0];
+        assert_eq!(v.volume, None);
+        assert_eq!(v.channels, vec![
+            ChannelVolume { channel: 6, volume: 0.6 },
+            ChannelVolume { channel: 7, volume: 0.6 },
+        ]);
         let _ = std::fs::remove_file(&p);
     }
 

@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../app_state.dart';
 import '../generated/protocol.dart';
 import '../theme.dart';
+import '../volume.dart';
 
 /// Zone lens — the primary, daily surface. Adaptive: a list of big tiles on a phone,
 /// a multi-column grid on a tablet/landscape (the wall-panel form factor). On/off is
@@ -70,6 +71,9 @@ class _ZoneTile extends StatelessWidget {
     final statusLine = !zone.active
         ? 'Off'
         : (zone.degraded ? 'On · degraded' : 'On');
+    // The server resolves each zone's representative node and reports its live volume.
+    // Show the slider when there's a controllable, present node; otherwise just status.
+    final hasVolume = zone.volumeNode != null && zone.volume != null;
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(14),
@@ -102,13 +106,38 @@ class _ZoneTile extends StatelessWidget {
               ],
             ),
             const Spacer(),
-            // NOTE: zone-level volume needs a `volume` field on ZoneView (server-side
-            // follow-up). Until then the tile owns on/off; per-node volume lives in the
-            // Graph lens. The toggle is the core daily action, so this is still useful.
-            Text(statusLine, style: Theme.of(context).textTheme.bodySmall),
+            if (hasVolume) _volumeRow(context) else Text(statusLine, style: Theme.of(context).textTheme.bodySmall),
           ],
         ),
       ),
+    );
+  }
+
+  // Zone volume: drives the representative node via `volumeNode`. Slider rides in
+  // perceptual space; we send raw-linear amplitude.
+  Widget _volumeRow(BuildContext context) {
+    final raw = zone.volume ?? 0;
+    return Row(
+      children: [
+        IconButton(
+          visualDensity: VisualDensity.compact,
+          padding: EdgeInsets.zero,
+          constraints: const BoxConstraints(),
+          icon: Icon(zone.muted ? Icons.volume_off : Icons.volume_up, size: 20),
+          tooltip: zone.muted ? 'Unmute' : 'Mute',
+          onPressed: () => state.toggleZoneMute(zone),
+        ),
+        Expanded(
+          child: Slider(
+            value: rawToPerceptual(raw),
+            onChanged: (p) => state.setZoneVolume(zone, perceptualToRaw(p)),
+          ),
+        ),
+        SizedBox(
+          width: 40,
+          child: Text('${perceptualPercent(raw)}%', textAlign: TextAlign.end),
+        ),
+      ],
     );
   }
 }

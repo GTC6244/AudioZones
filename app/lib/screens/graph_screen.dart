@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../app_state.dart';
 import '../generated/protocol.dart';
 import '../theme.dart';
+import '../volume.dart';
 
 /// Graph lens — power/setup. Read-mostly with a simple "tap two ports to link" model
 /// (works on a phone; comfortable on a tablet in landscape). Each node shows its
@@ -122,14 +123,15 @@ class _GraphScreenState extends State<GraphScreen> {
           onPressed: () => widget.state.toggleMute(n),
         ),
         Expanded(
+          // Slider rides in perceptual space; we store/send raw-linear amplitude.
           child: Slider(
-            value: (n.volume ?? 0).clamp(0.0, 1.0),
-            onChanged: (v) => widget.state.setNodeVolume(n, v),
+            value: rawToPerceptual(n.volume ?? 0),
+            onChanged: (p) => widget.state.setNodeVolume(n, perceptualToRaw(p)),
           ),
         ),
         SizedBox(
           width: 40,
-          child: Text('${((n.volume ?? 0) * 100).round()}%', textAlign: TextAlign.end),
+          child: Text('${perceptualPercent(n.volume ?? 0)}%', textAlign: TextAlign.end),
         ),
       ],
     );

@@ -62,6 +62,10 @@ class LinkView {
 
 class NodeView {
     
+    ///Raw-linear per-channel volumes in the node's channel order (empty if no volume control).
+    ///Lets a client show/drive individual channels (e.g. "card ch 7-8 -> patio").
+    List<double>? channelVolumes;
+    
     ///Stable key: `(node.name, media.class)[+serial]`. Survives reconnect; numeric PipeWire ids
     ///do not. See `identity`.
     String key;
@@ -74,10 +78,12 @@ class NodeView {
     ///"degraded".
     bool present;
     
-    ///0.0..=1.0. `None` if this node has no volume control.
+    ///Representative level, 0.0..=1.0 (the max across channels). `None` if this node has no
+    ///volume control. For a one-knob UI; per-channel detail lives in `channel_volumes`.
     double? volume;
 
     NodeView({
+        this.channelVolumes,
         required this.key,
         required this.mediaClass,
         required this.muted,
@@ -88,6 +94,7 @@ class NodeView {
     });
 
     factory NodeView.fromJson(Map<String, dynamic> json) => NodeView(
+        channelVolumes: json["channel_volumes"] == null ? [] : List<double>.from(json["channel_volumes"]!.map((x) => x?.toDouble())),
         key: json["key"],
         mediaClass: json["media_class"],
         muted: json["muted"],
@@ -98,6 +105,7 @@ class NodeView {
     );
 
     Map<String, dynamic> toJson() => {
+        "channel_volumes": channelVolumes == null ? [] : List<dynamic>.from(channelVolumes!.map((x) => x)),
         "key": key,
         "media_class": mediaClass,
         "muted": muted,
@@ -152,27 +160,48 @@ class ZoneView {
     
     ///Stable keys of devices the zone wants but can't currently reach.
     List<String> missing;
+    
+    ///Live mute state of `volume_node` (false when there's no volume node).
+    bool muted;
     String name;
+    
+    ///Live representative volume (0.0..=1.0) of `volume_node`, if that node is present. `None`
+    ///-> the tile shows no slider (node absent or zone has no volume node).
+    double? volume;
+    
+    ///The zone's representative node — the sink whose volume the zone tile controls (the first
+    ///volume-spec node, else the sink behind the zone's first link). `None` when the zone has
+    ///no controllable node. Clients PUT volume changes to this key.
+    String? volumeNode;
 
     ZoneView({
         required this.active,
         required this.degraded,
         required this.missing,
+        required this.muted,
         required this.name,
+        this.volume,
+        this.volumeNode,
     });
 
     factory ZoneView.fromJson(Map<String, dynamic> json) => ZoneView(
         active: json["active"],
         degraded: json["degraded"],
         missing: List<String>.from(json["missing"].map((x) => x)),
+        muted: json["muted"],
         name: json["name"],
+        volume: json["volume"]?.toDouble(),
+        volumeNode: json["volume_node"],
     );
 
     Map<String, dynamic> toJson() => {
         "active": active,
         "degraded": degraded,
         "missing": List<dynamic>.from(missing.map((x) => x)),
+        "muted": muted,
         "name": name,
+        "volume": volume,
+        "volume_node": volumeNode,
     };
 }
 

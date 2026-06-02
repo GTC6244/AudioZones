@@ -8,8 +8,10 @@
 //! Verified on real hardware (box 192.168.1.25): WirePlumber leaves device links alone,
 //! and `create_object("link-factory")` from another thread works.
 //!
-//! INCREMENT 1: read path (nodes/ports/links) + link create/destroy.
-//! TODO INCREMENT 2: volume via the node's `Props.channelVolumes` SPA POD (Q4 target).
+//! Read path (nodes/ports/links) + link create/destroy + volume/mute via the node's
+//! `Props.channelVolumes` SPA POD, including per-channel zone volume (#6). Device globals
+//! are tracked so a node's stable key can fold in its hardware path, disambiguating two
+//! identical cards (#9).
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -22,7 +24,7 @@ use tokio::sync::broadcast;
 
 use crate::backend::{BackendError, PwBackend};
 use crate::identity::{node_key, port_key};
-use crate::model::Action;
+use crate::model::{Action, VolumeTarget};
 use crate::wire::{Direction, GraphState, LinkView, NodeView, PortView};
 
 // ---- in-memory model, written only by the loop thread ----
@@ -32,15 +34,26 @@ struct Model {
     nodes: HashMap<u32, NodeRec>,
     ports: HashMap<u32, PortRec>,
     links: HashMap<u32, (u32, u32)>, // link id -> (output_port_id, input_port_id)
+    devices: HashMap<u32, DeviceRec>, // device id -> hardware path (for identical-card disambiguation)
 }
 
 struct NodeRec {
     name: String,
     media_class: String,
-    /// Live volume (representative across channels) + mute, filled by the Props
-    /// param listener. `None` volume = not yet reported / no volume control.
-    volume: Option<f32>,
+    /// Owning device's global id (from the node's `device.id` prop). Resolves to a
+    /// hardware path that disambiguates two identical cards (#9).
+    device_id: Option<u32>,
+    /// Live raw-linear per-channel volumes, filled by the Props param listener. Empty =
+    /// not yet reported / no volume control.
+    channel_volumes: Vec<f32>,
     muted: bool,
+}
+
+struct DeviceRec {
+    /// Port-position-stable hardware path (`device.bus-path`, falling back to
+    /// `api.alsa.path` / `object.path`). `None` if the device exposed no such prop.
+    /// Two identical USB cards differ here even when their `node.name` collides.
+    path: Option<String>,
 }
 
 struct PortRec {
@@ -50,18 +63,30 @@ struct PortRec {
 }
 
 impl Model {
+    /// The disambiguator folded into a node's stable key: its owning device's path.
+    fn node_disambiguator(&self, n: &NodeRec) -> Option<String> {
+        n.device_id
+            .and_then(|did| self.devices.get(&did))
+            .and_then(|d| d.path.clone())
+    }
+
+    /// A node's stable key, including the identical-card disambiguator when available.
+    fn node_stable_key(&self, n: &NodeRec) -> String {
+        node_key(&n.name, &n.media_class, self.node_disambiguator(n).as_deref())
+    }
+
     /// Compute a port's stable key from its owning node (or None if node unknown).
     fn port_stable_key(&self, port_id: u32) -> Option<String> {
         let p = self.ports.get(&port_id)?;
         let n = self.nodes.get(&p.node_id)?;
-        let nk = node_key(&n.name, &n.media_class);
+        let nk = self.node_stable_key(n);
         Some(port_key(&nk, &p.name, p.dir))
     }
 
     fn build_graph(&self) -> GraphState {
         let mut nodes = Vec::with_capacity(self.nodes.len());
         for (id, n) in &self.nodes {
-            let nk = node_key(&n.name, &n.media_class);
+            let nk = self.node_stable_key(n);
             let ports = self
                 .ports
                 .iter()
@@ -72,12 +97,19 @@ impl Model {
                     direction: p.dir,
                 })
                 .collect();
+            // Representative volume = the loudest channel (matches the one-knob UI).
+            let volume = n
+                .channel_volumes
+                .iter()
+                .cloned()
+                .fold(None::<f32>, |a, x| Some(a.map_or(x, |m| m.max(x))));
             nodes.push(NodeView {
                 key: nk,
                 name: n.name.clone(),
                 media_class: n.media_class.clone(),
                 ports,
-                volume: n.volume,
+                volume,
+                channel_volumes: n.channel_volumes.clone(),
                 muted: n.muted,
                 present: true,
             });
@@ -109,7 +141,7 @@ impl Model {
     /// monitor ports. Used to size `channelVolumes`.
     fn find_node(&self, key: &str) -> Option<(u32, usize)> {
         for (id, n) in &self.nodes {
-            if node_key(&n.name, &n.media_class) == key {
+            if self.node_stable_key(n) == key {
                 let primary = if n.media_class.contains("Source") {
                     Direction::Out
                 } else {
@@ -132,8 +164,32 @@ impl Model {
 enum Cmd {
     CreateLink { output_key: String, input_key: String },
     DestroyLink { output_key: String, input_key: String },
-    SetVolume { node_key: String, volume: f32 },
+    SetVolume { node_key: String, target: VolumeTarget },
     SetMute { node_key: String, muted: bool },
+}
+
+/// Build the full `channelVolumes` array to push for a [`VolumeTarget`]. `channelVolumes`
+/// must cover every channel, so per-channel targets preserve `current` on unlisted channels
+/// (defaulting unknown channels to full to avoid surprise-muting — `current` is normally
+/// seeded by the Props listener before any zone reconcile runs).
+fn build_channel_volumes(target: &VolumeTarget, channel_count: usize, current: &[f32]) -> Vec<f32> {
+    match target {
+        VolumeTarget::Uniform(v) => {
+            let v = v.clamp(0.0, 1.0);
+            vec![v; channel_count.max(current.len()).max(1)]
+        }
+        VolumeTarget::Channels(pairs) => {
+            let max_idx = pairs.iter().map(|(i, _)| i + 1).max().unwrap_or(0);
+            let n = channel_count.max(current.len()).max(max_idx);
+            let mut out: Vec<f32> = (0..n).map(|i| current.get(i).copied().unwrap_or(1.0)).collect();
+            for (idx, v) in pairs {
+                if *idx < out.len() {
+                    out[*idx] = v.clamp(0.0, 1.0);
+                }
+            }
+            out
+        }
+    }
 }
 
 pub struct PipewireBackend {
@@ -188,17 +244,20 @@ impl PwBackend for PipewireBackend {
             // Optimistic model update: reflect our own change immediately. PipeWire's
             // Props param-change events for ALSA nodes are unreliable (and wpctl changes
             // the device-route volume, a separate layer — see Q4), so we don't wait for a
-            // confirmation event. The listener still seeds correct INITIAL volumes.
-            Action::SetVolume { node_key, volume } => {
+            // confirmation event. The listener still seeds correct INITIAL volumes. We
+            // compute the exact array we're about to send so the model and the device agree.
+            Action::SetVolume { node_key, target } => {
                 if let Ok(mut m) = self.model.lock() {
-                    if let Some((nid, _)) = m.find_node(&node_key) {
+                    if let Some((nid, channels)) = m.find_node(&node_key) {
+                        let current = m.nodes.get(&nid).map(|n| n.channel_volumes.clone()).unwrap_or_default();
+                        let vols = build_channel_volumes(&target, channels, &current);
                         if let Some(n) = m.nodes.get_mut(&nid) {
-                            n.volume = Some(volume.clamp(0.0, 1.0));
+                            n.channel_volumes = vols;
                         }
                     }
                 }
                 self.cmd_tx
-                    .send(Cmd::SetVolume { node_key, volume })
+                    .send(Cmd::SetVolume { node_key, target })
                     .map_err(|_| BackendError::Rejected("loop thread gone".into()))
             }
             Action::SetMute { node_key, muted } => {
@@ -271,16 +330,28 @@ fn run_loop(
     let node_listeners: std::rc::Rc<RefCell<HashMap<u32, Box<dyn std::any::Any>>>> =
         std::rc::Rc::new(RefCell::new(HashMap::new()));
 
+    // Device proxies, bound as devices appear — needed to read `device.bus-path` from the
+    // device's INFO props (the registry global only carries name/class, not the bus path).
+    // That path disambiguates two identical cards (#9). Same lifetime pattern as nodes.
+    let device_proxies: std::rc::Rc<RefCell<HashMap<u32, pw::device::Device>>> =
+        std::rc::Rc::new(RefCell::new(HashMap::new()));
+    let device_listeners: std::rc::Rc<RefCell<HashMap<u32, Box<dyn std::any::Any>>>> =
+        std::rc::Rc::new(RefCell::new(HashMap::new()));
+
     let _listener = {
         let model_g = model.clone();
         let publish_g = publish.clone();
         let registry_g = registry.clone();
         let proxies_g = node_proxies.clone();
         let listeners_g = node_listeners.clone();
+        let dev_proxies_g = device_proxies.clone();
+        let dev_listeners_g = device_listeners.clone();
         let model_r = model.clone();
         let publish_r = publish.clone();
         let proxies_r = node_proxies.clone();
         let listeners_r = node_listeners.clone();
+        let dev_proxies_r = device_proxies.clone();
+        let dev_listeners_r = device_listeners.clone();
         registry
             .add_listener_local()
             .global(move |g| {
@@ -295,11 +366,13 @@ fn run_loop(
                             .add_listener_local()
                             .param(move |_seq, _id, _idx, _next, param| {
                                 let Some(pod) = param else { return };
-                                let Some((vol, mute)) = decode_props(pod) else { return };
+                                let Some((chans, mute)) = decode_props(pod) else { return };
                                 let mut m = model_p.lock().unwrap();
                                 if let Some(n) = m.nodes.get_mut(&id) {
-                                    if vol.is_some() {
-                                        n.volume = vol;
+                                    if let Some(c) = chans {
+                                        if !c.is_empty() {
+                                            n.channel_volumes = c;
+                                        }
                                     }
                                     if let Some(mu) = mute {
                                         n.muted = mu;
@@ -314,6 +387,47 @@ fn run_loop(
                         listeners_g.borrow_mut().insert(id, Box::new(listener));
                     }
                 }
+                if g.type_ == ObjectType::Device {
+                    if let Ok(device) = registry_g.bind::<pw::device::Device, _>(g) {
+                        let id = g.id;
+                        // Device INFO listener -> learn the port-position-stable bus path.
+                        let model_d = model_g.clone();
+                        let publish_d = publish_g.clone();
+                        let listener = device
+                            .add_listener_local()
+                            .info(move |info| {
+                                let Some(props) = info.props() else { return };
+                                // bus-path is the physical USB/PCI port (stable across reboot);
+                                // api.alsa.path is a card-index fallback. NOT object.path /
+                                // object.serial — those track enumeration order, not position.
+                                let path = props
+                                    .get("device.bus-path")
+                                    .or_else(|| props.get("api.alsa.path"))
+                                    .map(|s| s.to_string());
+                                if path.is_none() {
+                                    return;
+                                }
+                                let mut m = model_d.lock().unwrap();
+                                let changed = m
+                                    .devices
+                                    .get_mut(&id)
+                                    .map(|d| {
+                                        let diff = d.path != path;
+                                        d.path = path;
+                                        diff
+                                    })
+                                    .unwrap_or(false);
+                                drop(m);
+                                // Node keys fold in this path, so re-publish to settle them.
+                                if changed {
+                                    publish_d();
+                                }
+                            })
+                            .register();
+                        dev_proxies_g.borrow_mut().insert(id, device);
+                        dev_listeners_g.borrow_mut().insert(id, Box::new(listener));
+                    }
+                }
                 if changed {
                     publish_g();
                 }
@@ -322,10 +436,13 @@ fn run_loop(
                 // Drop the listener before the proxy.
                 listeners_r.borrow_mut().remove(&id);
                 proxies_r.borrow_mut().remove(&id);
+                dev_listeners_r.borrow_mut().remove(&id);
+                dev_proxies_r.borrow_mut().remove(&id);
                 let mut m = model_r.lock().unwrap();
                 let changed = m.nodes.remove(&id).is_some()
                     | m.ports.remove(&id).is_some()
-                    | m.links.remove(&id).is_some();
+                    | m.links.remove(&id).is_some()
+                    | m.devices.remove(&id).is_some();
                 drop(m);
                 if changed {
                     publish_r();
@@ -382,15 +499,21 @@ fn run_loop(
                 tracing::warn!("destroy_link: no matching link");
             }
         }
-        Cmd::SetVolume { node_key, volume } => {
-            let resolved = model_cmd.lock().unwrap().find_node(&node_key);
-            let Some((nid, channels)) = resolved else {
+        Cmd::SetVolume { node_key, target } => {
+            let resolved = {
+                let m = model_cmd.lock().unwrap();
+                m.find_node(&node_key).map(|(nid, channels)| {
+                    let current = m.nodes.get(&nid).map(|n| n.channel_volumes.clone()).unwrap_or_default();
+                    (nid, channels, current)
+                })
+            };
+            let Some((nid, channels, current)) = resolved else {
                 tracing::warn!("set_volume: unknown node key");
                 return;
             };
             if let Some(node) = proxies_cmd.borrow().get(&nid) {
-                let n = channels.max(1);
-                set_node_props(node, Some(vec![volume.clamp(0.0, 1.0); n]), None);
+                let vols = build_channel_volumes(&target, channels, &current);
+                set_node_props(node, Some(vols), None);
             }
         }
         Cmd::SetMute { node_key, muted } => {
@@ -447,15 +570,16 @@ fn set_node_props(node: &pw::node::Node, channel_volumes: Option<Vec<f32>>, mute
     }
 }
 
-/// Decode a node `Props` POD into (representative volume, mute). Volume = the max of
-/// `channelVolumes` (falling back to the scalar `volume`). Returns None if neither is present.
-fn decode_props(pod: &pw::spa::pod::Pod) -> Option<(Option<f32>, Option<bool>)> {
+/// Decode a node `Props` POD into (per-channel volumes, mute). Returns None if the POD is
+/// not a Props object. The channel array is `None` when no `channelVolumes` is present
+/// (a scalar-only Props emission), so callers leave the known per-channel value untouched.
+fn decode_props(pod: &pw::spa::pod::Pod) -> Option<(Option<Vec<f32>>, Option<bool>)> {
     use pw::spa::pod::{deserialize::PodDeserializer, Value, ValueArray};
 
     let (_, value) = PodDeserializer::deserialize_from::<Value>(pod.as_bytes()).ok()?;
     let Value::Object(obj) = value else { return None };
 
-    let mut volume: Option<f32> = None;
+    let mut channel_volumes: Option<Vec<f32>> = None;
     let mut mute: Option<bool> = None;
     for p in obj.properties {
         match p.key {
@@ -464,7 +588,7 @@ fn decode_props(pod: &pw::spa::pod::Pod) -> Option<(Option<f32>, Option<bool>)> 
             // it would clobber the real per-channel value on scalar-only Props emissions.
             pw::spa::sys::SPA_PROP_channelVolumes => {
                 if let Value::ValueArray(ValueArray::Float(v)) = p.value {
-                    volume = v.into_iter().fold(volume, |acc, x| Some(acc.map_or(x, |m| m.max(x))));
+                    channel_volumes = Some(v);
                 }
             }
             pw::spa::sys::SPA_PROP_mute => {
@@ -475,7 +599,7 @@ fn decode_props(pod: &pw::spa::pod::Pod) -> Option<(Option<f32>, Option<bool>)> 
             _ => {}
         }
     }
-    Some((volume, mute))
+    Some((channel_volumes, mute))
 }
 
 /// Fold one registry global into the model. Returns true if the model changed.
@@ -486,19 +610,29 @@ fn ingest_global(model: &Arc<Mutex<Model>>, g: &pw::registry::GlobalObject<&pw::
     };
     let mut m = model.lock().unwrap();
     match g.type_ {
+        ObjectType::Device => {
+            // The registry global only carries device.name/class — NOT the bus path. That
+            // comes from the device's INFO event (see the device listener in run_loop),
+            // which fills `path`. Preserve any path already learned across re-announces.
+            let path = m.devices.get(&g.id).and_then(|d| d.path.clone());
+            m.devices.insert(g.id, DeviceRec { path });
+            true
+        }
         ObjectType::Node => {
             // Preserve any volume already learned for this id (re-announce shouldn't wipe it).
-            let (volume, muted) = m
+            let (channel_volumes, muted) = m
                 .nodes
                 .get(&g.id)
-                .map(|n| (n.volume, n.muted))
-                .unwrap_or((None, false));
+                .map(|n| (n.channel_volumes.clone(), n.muted))
+                .unwrap_or((Vec::new(), false));
+            let device_id = props.get("device.id").and_then(|s| s.parse().ok());
             m.nodes.insert(
                 g.id,
                 NodeRec {
                     name: props.get("node.name").unwrap_or("").to_string(),
                     media_class: props.get("media.class").unwrap_or("").to_string(),
-                    volume,
+                    device_id,
+                    channel_volumes,
                     muted,
                 },
             );

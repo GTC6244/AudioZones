@@ -16,15 +16,28 @@
 
 use std::collections::BTreeSet;
 
-use crate::wire::GraphState;
+use crate::wire::{GraphState, NodeView};
 use crate::zones::{ZoneStore, VolumeSpec};
+
+/// Closeness threshold for "this volume already matches" — avoids reconcile churn from
+/// float round-trips.
+const VOL_EPS: f32 = 0.001;
+
+/// What level to push to a node's volume.
+#[derive(Clone, Debug, PartialEq)]
+pub enum VolumeTarget {
+    /// Same raw-linear level on every channel.
+    Uniform(f32),
+    /// Specific channels by 0-based index; channels not listed keep their current value.
+    Channels(Vec<(usize, f32)>),
+}
 
 /// A single mutation the backend should apply.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
     CreateLink { output_port: String, input_port: String },
     DestroyLink { output_port: String, input_port: String },
-    SetVolume { node_key: String, volume: f32 },
+    SetVolume { node_key: String, target: VolumeTarget },
     SetMute { node_key: String, muted: bool },
 }
 
@@ -82,11 +95,8 @@ pub fn reconcile(desired: &Desired, actual: &GraphState) -> Vec<Action> {
     // Correct volumes/mute where the node exists and differs.
     for v in &desired.volumes {
         if let Some(node) = actual.nodes.iter().find(|n| n.key == v.node_key) {
-            if node.volume.map_or(true, |cur| (cur - v.volume).abs() > 0.001) {
-                actions.push(Action::SetVolume {
-                    node_key: v.node_key.clone(),
-                    volume: v.volume,
-                });
+            if let Some(target) = volume_correction(v, node) {
+                actions.push(Action::SetVolume { node_key: v.node_key.clone(), target });
             }
             if node.muted != v.muted {
                 actions.push(Action::SetMute {
@@ -98,6 +108,30 @@ pub fn reconcile(desired: &Desired, actual: &GraphState) -> Vec<Action> {
     }
 
     actions
+}
+
+/// The volume Action needed to bring `node` to what `spec` wants, or `None` if it already
+/// matches. Per-channel specs win over the uniform `volume`; a spec with neither is a no-op.
+fn volume_correction(spec: &VolumeSpec, node: &NodeView) -> Option<VolumeTarget> {
+    if !spec.channels.is_empty() {
+        let any_diff = spec.channels.iter().any(|c| {
+            node.channel_volumes
+                .get(c.channel)
+                .map_or(true, |cur| (cur - c.volume).abs() > VOL_EPS)
+        });
+        return any_diff.then(|| {
+            VolumeTarget::Channels(spec.channels.iter().map(|c| (c.channel, c.volume)).collect())
+        });
+    }
+    let vol = spec.volume?;
+    // Prefer the live per-channel array; fall back to the representative scalar when the
+    // backend reported no channels (e.g. a node with only a master volume).
+    let matches = if node.channel_volumes.is_empty() {
+        node.volume.map_or(false, |cur| (cur - vol).abs() <= VOL_EPS)
+    } else {
+        node.channel_volumes.iter().all(|cur| (cur - vol).abs() <= VOL_EPS)
+    };
+    (!matches).then_some(VolumeTarget::Uniform(vol))
 }
 
 /// Stable keys of devices an active zone wants but that aren't present -> "degraded".
@@ -139,8 +173,22 @@ mod tests {
             media_class: "Audio/Sink".into(),
             ports,
             volume: vol,
+            channel_volumes: vol.map(|v| vec![v]).unwrap_or_default(),
             muted: false,
             present,
+        }
+    }
+
+    fn node_channels(key: &str, channels: Vec<f32>, ports: Vec<PortView>) -> NodeView {
+        NodeView {
+            key: key.into(),
+            name: key.into(),
+            media_class: "Audio/Sink".into(),
+            ports,
+            volume: channels.iter().cloned().fold(None::<f32>, |a, x| Some(a.map_or(x, |m| m.max(x)))),
+            channel_volumes: channels,
+            muted: false,
+            present: true,
         }
     }
     fn port(key: &str, dir: Direction) -> PortView {
@@ -154,7 +202,7 @@ mod tests {
         s.zones.push(ZoneDef {
             name: "patio".into(),
             links: vec![LinkSpec { output_port: "OUT".into(), input_port: "IN".into() }],
-            volumes: vec![VolumeSpec { node_key: "AMP".into(), volume: 0.5, muted: false }],
+            volumes: vec![VolumeSpec { node_key: "AMP".into(), volume: Some(0.5), channels: vec![], muted: false }],
         });
         s.set_active("patio", true).unwrap();
         s
@@ -195,7 +243,53 @@ mod tests {
             ..Default::default()
         };
         let actions = reconcile(&desired, &actual);
-        assert_eq!(actions, vec![Action::SetVolume { node_key: "AMP".into(), volume: 0.5 }]);
+        assert_eq!(
+            actions,
+            vec![Action::SetVolume { node_key: "AMP".into(), target: VolumeTarget::Uniform(0.5) }]
+        );
+    }
+
+    #[test]
+    fn reconcile_corrects_only_specified_channels() {
+        use crate::zones::{ChannelVolume, LinkSpec, ZoneDef};
+        let p = std::env::temp_dir().join("audiozones-model-perchannel.toml");
+        let _ = std::fs::remove_file(&p);
+        let mut store = ZoneStore::load(&p).unwrap();
+        store.zones.push(ZoneDef {
+            name: "patio".into(),
+            links: vec![LinkSpec { output_port: "OUT".into(), input_port: "IN".into() }],
+            volumes: vec![VolumeSpec {
+                node_key: "CARD".into(),
+                volume: None,
+                channels: vec![ChannelVolume { channel: 6, volume: 0.6 }, ChannelVolume { channel: 7, volume: 0.6 }],
+                muted: false,
+            }],
+        });
+        store.set_active("patio", true).unwrap();
+        let desired = desired_from_active(&store);
+
+        // 8-ch card: channels 6,7 are wrong (1.0) -> a Channels correction; the rest untouched.
+        let actual = GraphState {
+            links: vec![LinkView { output_port: "OUT".into(), input_port: "IN".into() }],
+            nodes: vec![node_channels("CARD", vec![1.0; 8], vec![])],
+            ..Default::default()
+        };
+        let actions = reconcile(&desired, &actual);
+        assert_eq!(
+            actions,
+            vec![Action::SetVolume { node_key: "CARD".into(), target: VolumeTarget::Channels(vec![(6, 0.6), (7, 0.6)]) }]
+        );
+
+        // Already at 0.6 on 6,7 -> no-op (other channels' values are irrelevant).
+        let mut chans = vec![1.0; 8];
+        chans[6] = 0.6;
+        chans[7] = 0.6;
+        let satisfied = GraphState {
+            links: vec![LinkView { output_port: "OUT".into(), input_port: "IN".into() }],
+            nodes: vec![node_channels("CARD", chans, vec![])],
+            ..Default::default()
+        };
+        assert!(reconcile(&desired, &satisfied).is_empty());
     }
 
     #[test]

@@ -12,7 +12,7 @@ use thiserror::Error;
 use tokio::sync::broadcast;
 
 use crate::identity::{node_key, port_key};
-use crate::model::Action;
+use crate::model::{Action, VolumeTarget};
 use crate::wire::{Direction, GraphState, LinkView, NodeView, PortView};
 
 #[derive(Debug, Error)]
@@ -74,13 +74,13 @@ impl PwBackend for MockBackend {
                     g.links
                         .retain(|l| !(l.output_port == output_port && l.input_port == input_port));
                 }
-                Action::SetVolume { node_key, volume } => {
+                Action::SetVolume { node_key, target } => {
                     let n = g
                         .nodes
                         .iter_mut()
                         .find(|n| n.key == node_key)
                         .ok_or_else(|| BackendError::Rejected(format!("no node {node_key}")))?;
-                    n.volume = Some(volume.clamp(0.0, 1.0));
+                    apply_volume_target(n, &target);
                 }
                 Action::SetMute { node_key, muted } => {
                     let n = g
@@ -98,11 +98,33 @@ impl PwBackend for MockBackend {
     }
 }
 
+/// Apply a [`VolumeTarget`] to a node's `channel_volumes`, then refresh the representative
+/// `volume` (the max across channels). Uniform replaces all channels; Channels overlays the
+/// listed indices (growing the array if needed), leaving the rest untouched.
+fn apply_volume_target(n: &mut NodeView, target: &VolumeTarget) {
+    match target {
+        VolumeTarget::Uniform(v) => {
+            let v = v.clamp(0.0, 1.0);
+            let len = n.channel_volumes.len().max(1);
+            n.channel_volumes = vec![v; len];
+        }
+        VolumeTarget::Channels(pairs) => {
+            for (idx, v) in pairs {
+                if *idx >= n.channel_volumes.len() {
+                    n.channel_volumes.resize(idx + 1, 0.0);
+                }
+                n.channel_volumes[*idx] = v.clamp(0.0, 1.0);
+            }
+        }
+    }
+    n.volume = n.channel_volumes.iter().cloned().fold(None::<f32>, |a, x| Some(a.map_or(x, |m| m.max(x))));
+}
+
 /// Seed a believable graph: one USB capture source + two sink "amps" to route to.
 fn seed_graph() -> GraphState {
-    let src = node_key("USB Capture", "Audio/Source");
-    let kitchen = node_key("Kitchen Amp", "Audio/Sink");
-    let patio = node_key("Patio Amp", "Audio/Sink");
+    let src = node_key("USB Capture", "Audio/Source", None);
+    let kitchen = node_key("Kitchen Amp", "Audio/Sink", None);
+    let patio = node_key("Patio Amp", "Audio/Sink", None);
 
     let source = NodeView {
         ports: vec![
@@ -113,6 +135,7 @@ fn seed_graph() -> GraphState {
         name: "USB Capture".into(),
         media_class: "Audio/Source".into(),
         volume: None,
+        channel_volumes: vec![],
         muted: false,
         present: true,
     };
@@ -135,6 +158,7 @@ fn sink(key: &str, name: &str) -> NodeView {
         name: name.to_string(),
         media_class: "Audio/Sink".into(),
         volume: Some(0.8),
+        channel_volumes: vec![0.8, 0.8],
         muted: false,
         present: true,
     }

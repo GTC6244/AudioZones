@@ -29,8 +29,13 @@ pub struct NodeView {
     pub name: String,
     pub media_class: String,
     pub ports: Vec<PortView>,
-    /// 0.0..=1.0. `None` if this node has no volume control.
+    /// Representative level, 0.0..=1.0 (the max across channels). `None` if this node has
+    /// no volume control. For a one-knob UI; per-channel detail lives in `channel_volumes`.
     pub volume: Option<f32>,
+    /// Raw-linear per-channel volumes in the node's channel order (empty if no volume
+    /// control). Lets a client show/drive individual channels (e.g. "card ch 7-8 -> patio").
+    #[serde(default)]
+    pub channel_volumes: Vec<f32>,
     pub muted: bool,
     /// False when the device is not currently present (unplugged); zones depending
     /// on it show "degraded".
@@ -66,4 +71,13 @@ pub struct ZoneView {
     pub degraded: bool,
     /// Stable keys of devices the zone wants but can't currently reach.
     pub missing: Vec<String>,
+    /// The zone's representative node — the sink whose volume the zone tile controls
+    /// (the first volume-spec node, else the sink behind the zone's first link). `None`
+    /// when the zone has no controllable node. Clients PUT volume changes to this key.
+    pub volume_node: Option<String>,
+    /// Live representative volume (0.0..=1.0) of `volume_node`, if that node is present.
+    /// `None` -> the tile shows no slider (node absent or zone has no volume node).
+    pub volume: Option<f32>,
+    /// Live mute state of `volume_node` (false when there's no volume node).
+    pub muted: bool,
 }
