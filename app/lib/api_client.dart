@@ -38,6 +38,23 @@ class ApiClient {
         }),
       ));
 
+  /// Edit a zone: `currentName` identifies it, `newName` is the (possibly unchanged) name,
+  /// and `links` is the full replacement link set. Volumes are preserved server-side. Same
+  /// validation as create plus 404 if `currentName` is unknown; `_send` surfaces failures.
+  Future<void> updateZone(
+          String currentName, String newName, List<LinkView> links) =>
+      _send(http.put(
+        _uri('/zones/${_enc(currentName)}'),
+        headers: _headers,
+        body: jsonEncode({
+          'name': newName,
+          'links': [
+            for (final l in links)
+              {'output_port': l.outputPort, 'input_port': l.inputPort}
+          ],
+        }),
+      ));
+
   Future<void> deleteZone(String name) =>
       _send(http.delete(_uri('/zones/${_enc(name)}'), headers: _headers));
 

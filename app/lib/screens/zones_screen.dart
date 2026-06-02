@@ -4,7 +4,7 @@ import '../app_state.dart';
 import '../generated/protocol.dart';
 import '../theme.dart';
 import '../volume.dart';
-import 'create_zone_screen.dart';
+import 'zone_editor_screen.dart';
 
 /// Zone lens — the primary, daily surface. Adaptive: a list of big tiles on a phone,
 /// a multi-column grid on a tablet/landscape (the wall-panel form factor). On/off is
@@ -61,7 +61,7 @@ class ZonesScreen extends StatelessWidget {
             FilledButton.icon(
               onPressed: () => Navigator.of(context).push(
                 MaterialPageRoute(
-                  builder: (_) => CreateZoneScreen(state: state),
+                  builder: (_) => ZoneEditorScreen(state: state),
                 ),
               ),
               icon: const Icon(Icons.add),
@@ -117,9 +117,17 @@ class _ZoneTile extends StatelessWidget {
                 PopupMenuButton<String>(
                   tooltip: 'Zone options',
                   onSelected: (v) {
-                    if (v == 'delete') _confirmDelete(context);
+                    if (v == 'edit') {
+                      Navigator.of(context).push(MaterialPageRoute(
+                        builder: (_) =>
+                            ZoneEditorScreen(state: state, existing: zone),
+                      ));
+                    } else if (v == 'delete') {
+                      _confirmDelete(context);
+                    }
                   },
                   itemBuilder: (_) => const [
+                    PopupMenuItem(value: 'edit', child: Text('Edit zone')),
                     PopupMenuItem(value: 'delete', child: Text('Delete zone')),
                   ],
                 ),

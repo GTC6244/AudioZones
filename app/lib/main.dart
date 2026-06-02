@@ -3,8 +3,8 @@ import 'package:flutter/material.dart';
 import 'api_client.dart';
 import 'app_state.dart';
 import 'config.dart';
-import 'screens/create_zone_screen.dart';
 import 'screens/graph_screen.dart';
+import 'screens/zone_editor_screen.dart';
 import 'screens/zones_screen.dart';
 import 'theme.dart';
 
@@ -67,7 +67,7 @@ class _HomeShellState extends State<HomeShell> {
                   tooltip: 'New zone',
                   onPressed: () => Navigator.of(context).push(
                     MaterialPageRoute(
-                      builder: (_) => CreateZoneScreen(state: s),
+                      builder: (_) => ZoneEditorScreen(state: s),
                     ),
                   ),
                   child: const Icon(Icons.add),

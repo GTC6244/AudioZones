@@ -3,28 +3,38 @@ import 'package:flutter/material.dart';
 import '../app_state.dart';
 import '../generated/protocol.dart';
 
-/// Create-zone builder. A zone is a name + one or more links; this screen assembles
-/// that link list, then POSTs it (the new zone arrives Off in the next snapshot).
+/// Zone editor — creates a new zone or edits an existing one (pass `existing`). A zone is
+/// a name + one or more links; this screen assembles that link list, then POSTs (create)
+/// or PUTs (edit). Volumes aren't touched here — an edit preserves them server-side.
 ///
 /// "Add link" is a two-step pick: first a source (any output port), then a destination.
 /// Destinations are filtered to input ports containing "playback" — the sink inputs you
 /// actually route audio into (e.g. `playback_FL`/`FR`), keeping the picker to real targets.
-class CreateZoneScreen extends StatefulWidget {
+class ZoneEditorScreen extends StatefulWidget {
   final AppState state;
-  const CreateZoneScreen({super.key, required this.state});
+
+  /// The zone to edit, or `null` to create a new one.
+  final ZoneView? existing;
+
+  const ZoneEditorScreen({super.key, required this.state, this.existing});
+
+  bool get isEdit => existing != null;
 
   @override
-  State<CreateZoneScreen> createState() => _CreateZoneScreenState();
+  State<ZoneEditorScreen> createState() => _ZoneEditorScreenState();
 }
 
-class _CreateZoneScreenState extends State<CreateZoneScreen> {
-  final _name = TextEditingController();
-  final List<LinkView> _links = [];
+class _ZoneEditorScreenState extends State<ZoneEditorScreen> {
+  late final TextEditingController _name;
+  late final List<LinkView> _links;
   bool _saving = false;
 
   @override
   void initState() {
     super.initState();
+    _name = TextEditingController(text: widget.existing?.name ?? '');
+    // Copy into a local working list so add/remove only commit on Save.
+    _links = [...?widget.existing?.links];
     // Re-run the Save-button enable/disable check as the user types.
     _name.addListener(() => setState(() {}));
   }
@@ -47,7 +57,7 @@ class _CreateZoneScreenState extends State<CreateZoneScreen> {
         final g = widget.state.graph;
         return Scaffold(
           appBar: AppBar(
-            title: const Text('New zone'),
+            title: Text(widget.isEdit ? 'Edit zone' : 'New zone'),
             actions: [
               TextButton(
                 onPressed: _canSave ? _save : null,
@@ -69,7 +79,7 @@ class _CreateZoneScreenState extends State<CreateZoneScreen> {
       children: [
         TextField(
           controller: _name,
-          autofocus: true,
+          autofocus: !widget.isEdit,
           textCapitalization: TextCapitalization.words,
           decoration: const InputDecoration(
             labelText: 'Zone name',
@@ -126,11 +136,12 @@ class _CreateZoneScreenState extends State<CreateZoneScreen> {
       options: _playbackInputPorts(g),
     );
     if (inp == null) return;
-    final link = LinkView(outputPort: out, inputPort: inp);
     // Skip an exact duplicate of an already-added link.
-    final dup = _links.any(
-        (l) => l.outputPort == out && l.inputPort == inp);
-    if (!dup) setState(() => _links.add(link));
+    final dup =
+        _links.any((l) => l.outputPort == out && l.inputPort == inp);
+    if (!dup) {
+      setState(() => _links.add(LinkView(outputPort: out, inputPort: inp)));
+    }
   }
 
   List<_PortOption> _outputPorts(GraphState g) => [
@@ -189,14 +200,20 @@ class _CreateZoneScreenState extends State<CreateZoneScreen> {
 
   Future<void> _save() async {
     setState(() => _saving = true);
+    final name = _name.text.trim();
     try {
-      await widget.state.createZone(_name.text.trim(), _links);
+      if (widget.isEdit) {
+        await widget.state.updateZone(widget.existing!.name, name, _links);
+      } else {
+        await widget.state.createZone(name, _links);
+      }
       if (mounted) Navigator.pop(context);
     } catch (e) {
       if (!mounted) return;
       setState(() => _saving = false);
+      final verb = widget.isEdit ? 'update' : 'create';
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Could not create zone: $e')),
+        SnackBar(content: Text('Could not $verb zone: $e')),
       );
     }
   }
