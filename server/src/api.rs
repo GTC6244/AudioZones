@@ -123,11 +123,11 @@ fn token_ok(expected: &str, req: &Request) -> bool {
         }
     }
     if let Some(q) = req.uri().query() {
-        for pair in q.split('&') {
-            if let Some(t) = pair.strip_prefix("token=") {
-                if t == expected {
-                    return true;
-                }
+        // Percent-decode the query so a token with reserved characters (the Dart
+        // client sends it via `Uri.encodeComponent`) compares against the raw value.
+        for (k, v) in form_urlencoded::parse(q.as_bytes()) {
+            if k == "token" && v == expected {
+                return true;
             }
         }
     }
@@ -185,7 +185,11 @@ async fn set_volume(
         .apply(Action::SetVolume { node_key: key.clone(), target: VolumeTarget::Uniform(body.volume) })
         .map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
     if let Some(muted) = body.muted {
-        let _ = s.backend.apply(Action::SetMute { node_key: key, muted });
+        // The client always sends `muted`, so a failure here is a real partial
+        // apply — surface it instead of returning 204 for a half-applied command.
+        s.backend
+            .apply(Action::SetMute { node_key: key, muted })
+            .map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
     }
     publish(&s);
     Ok(StatusCode::NO_CONTENT)
@@ -247,4 +251,40 @@ async fn ws_loop(mut socket: WebSocket, state: Arc<AppState>) {
 async fn send_snapshot(socket: &mut WebSocket, snap: &GraphState) -> Result<(), axum::Error> {
     let text = serde_json::to_string(snap).unwrap_or_else(|_| "{}".into());
     socket.send(Message::Text(text)).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+
+    fn req_with_query(query: &str) -> Request {
+        Request::builder()
+            .uri(format!("/ws?{query}"))
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    #[test]
+    fn query_token_is_percent_decoded() {
+        // A token with reserved chars, sent as the Dart client encodes it.
+        let token = "a b+c/d=e";
+        let encoded = "token=a%20b%2Bc%2Fd%3De";
+        assert!(token_ok(token, &req_with_query(encoded)));
+    }
+
+    #[test]
+    fn query_token_mismatch_is_rejected() {
+        assert!(!token_ok("secret", &req_with_query("token=wrong")));
+    }
+
+    #[test]
+    fn header_bearer_token_still_works() {
+        let req = Request::builder()
+            .uri("/graph")
+            .header(header::AUTHORIZATION, "Bearer secret")
+            .body(Body::empty())
+            .unwrap();
+        assert!(token_ok("secret", &req));
+    }
 }

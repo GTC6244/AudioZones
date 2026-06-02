@@ -119,8 +119,9 @@ impl ZoneStore {
         }
     }
 
-    /// Atomic write: serialize to `<file>.tmp`, fsync, rename over the real file.
-    /// A crash mid-write never corrupts the existing zones.
+    /// Atomic write: serialize to `<file>.tmp`, fsync, rename over the real file,
+    /// then fsync the parent dir so the rename itself is durable. A crash mid-write
+    /// never corrupts the existing zones; a power loss after rename keeps the new file.
     pub fn save(&self) -> Result<(), ZoneError> {
         let text = toml::to_string_pretty(self)?;
         let tmp = self.path.with_extension("toml.tmp");
@@ -131,6 +132,15 @@ impl ZoneStore {
             f.sync_all()?;
         }
         std::fs::rename(&tmp, &self.path)?;
+        // Fsync the directory entry: the file contents were synced above, but the
+        // rename (the directory update) must also be flushed to survive power loss.
+        if let Some(dir) = self.path.parent() {
+            // An empty parent means the CWD; fsync "." in that case.
+            let dir = if dir.as_os_str().is_empty() { Path::new(".") } else { dir };
+            if let Ok(d) = std::fs::File::open(dir) {
+                let _ = d.sync_all();
+            }
+        }
         Ok(())
     }
 

@@ -60,6 +60,11 @@ class AppState extends ChangeNotifier {
     notifyListeners();
     _sub?.cancel();
     _sub = null;
+    // Close the old socket too — cancelling the subscription alone leaves the
+    // underlying connection open until the server times it out, leaking sockets
+    // across reconnect churn.
+    _channel?.sink.close();
+    _channel = null;
     Future.delayed(const Duration(seconds: 2), _connect);
   }
 

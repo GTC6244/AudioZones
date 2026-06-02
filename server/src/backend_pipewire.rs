@@ -570,9 +570,11 @@ fn set_node_props(node: &pw::node::Node, channel_volumes: Option<Vec<f32>>, mute
     }
 }
 
-/// Decode a node `Props` POD into (per-channel volumes, mute). Returns None if the POD is
-/// not a Props object. The channel array is `None` when no `channelVolumes` is present
-/// (a scalar-only Props emission), so callers leave the known per-channel value untouched.
+/// Decode a node `Props` POD into (per-channel volumes, mute). The channel array is `None`
+/// when no `channelVolumes` is present (a scalar-only Props emission), so callers leave the
+/// known per-channel value untouched. Returns `None` for the whole POD when it carries
+/// neither channelVolumes nor mute, so unrelated Props emissions don't trigger redundant
+/// snapshot broadcasts.
 fn decode_props(pod: &pw::spa::pod::Pod) -> Option<(Option<Vec<f32>>, Option<bool>)> {
     use pw::spa::pod::{deserialize::PodDeserializer, Value, ValueArray};
 
@@ -598,6 +600,11 @@ fn decode_props(pod: &pw::spa::pod::Pod) -> Option<(Option<Vec<f32>>, Option<boo
             }
             _ => {}
         }
+    }
+    // Nothing relevant in this Props emission — signal "no change" so the caller skips
+    // the model update and the broadcast it would otherwise trigger.
+    if channel_volumes.is_none() && mute.is_none() {
+        return None;
     }
     Some((channel_volumes, mute))
 }
