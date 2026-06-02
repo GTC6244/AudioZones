@@ -14,5 +14,16 @@ input_port = "Audio/Sink|Patio Amp#in:playback_FR"
 
 [[zones.volumes]]
 node_key = "Audio/Sink|Patio Amp"
-volume = 0.5
+volume = 0.5       # uniform: applied to every channel (the common case)
 muted = false
+
+# Per-channel volume (#6): drive specific channels of a multi-channel card and leave the
+# rest untouched. `channels` (0-based indices) takes precedence over `volume`. Example —
+# an 8-channel USB card whose channels 6-7 feed the patio at 0.6:
+#
+# [[zones.volumes]]
+# node_key = "Audio/Sink|8ch USB Card"
+# channels = [
+#   { channel = 6, volume = 0.6 },
+#   { channel = 7, volume = 0.6 },
+# ]

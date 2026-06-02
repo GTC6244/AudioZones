@@ -71,16 +71,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     api::reconcile_and_apply(&state);
     api::publish(&state);
 
-    // Relay: any backend graph change -> recompose (with zone overlay) -> WS clients.
-    // In the real backend this is how a CLI change shows up in the app with no refresh.
+    // Relay: any backend graph change -> reconcile active zones against the new graph,
+    // then recompose (with zone overlay) -> WS clients. Reconciling here (not just at boot
+    // and on zone toggle) is what makes auto-reapply real: when a device appears after
+    // startup, its links get created the moment its ports show up. Reconcile is idempotent
+    // and only creates links whose ports are present, so the startup burst stays quiet and
+    // the loop converges (a created link re-enters as a no-op). In the real backend this is
+    // also how an external CLI change shows up in the app with no refresh.
     {
         let state = state.clone();
         let mut brx = backend.subscribe();
         tokio::spawn(async move {
             loop {
                 match brx.recv().await {
-                    Ok(_) => api::publish(&state),
-                    Err(broadcast::error::RecvError::Lagged(_)) => api::publish(&state),
+                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {
+                        api::reconcile_and_apply(&state);
+                        api::publish(&state);
+                    }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }

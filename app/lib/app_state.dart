@@ -79,6 +79,20 @@ class AppState extends ChangeNotifier {
   Future<void> toggleMute(NodeView n) =>
       api.setVolume(n.key, n.volume ?? 1.0, !n.muted);
 
+  // Zone-tile volume targets the zone's representative node (`volumeNode`). No-op if the
+  // zone has no controllable node. `volume` is raw-linear; the UI does the perceptual map.
+  Future<void> setZoneVolume(ZoneView z, double volume) {
+    final key = z.volumeNode;
+    if (key == null) return Future.value();
+    return api.setVolume(key, volume, z.muted);
+  }
+
+  Future<void> toggleZoneMute(ZoneView z) {
+    final key = z.volumeNode;
+    if (key == null) return Future.value();
+    return api.setVolume(key, z.volume ?? 1.0, !z.muted);
+  }
+
   Future<void> createLink(String outputPort, String inputPort) =>
       api.createLink(outputPort, inputPort);
 

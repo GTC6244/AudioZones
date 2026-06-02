@@ -22,7 +22,7 @@ use serde::Deserialize;
 use tokio::sync::broadcast;
 
 use crate::backend::PwBackend;
-use crate::model::{self, Action};
+use crate::model::{self, Action, VolumeTarget};
 use crate::wire::{GraphState, ZoneView};
 use crate::zones::ZoneStore;
 
@@ -48,7 +48,23 @@ pub fn compose(state: &AppState) -> GraphState {
             } else {
                 Vec::new()
             };
-            ZoneView { name: z.name.clone(), active, degraded: !missing.is_empty(), missing }
+            // Surface the live volume/mute of the zone's representative node so the tile
+            // can show a slider; `volume_node` is where the client PUTs changes.
+            let volume_node = z.primary_node();
+            let (volume, muted) = volume_node
+                .as_ref()
+                .and_then(|k| g.nodes.iter().find(|n| &n.key == k))
+                .map(|n| (n.volume, n.muted))
+                .unwrap_or((None, false));
+            ZoneView {
+                name: z.name.clone(),
+                active,
+                degraded: !missing.is_empty(),
+                missing,
+                volume_node,
+                volume,
+                muted,
+            }
         })
         .collect();
     g
@@ -166,7 +182,7 @@ async fn set_volume(
     Json(body): Json<VolumeBody>,
 ) -> Result<StatusCode, ApiError> {
     s.backend
-        .apply(Action::SetVolume { node_key: key.clone(), volume: body.volume })
+        .apply(Action::SetVolume { node_key: key.clone(), target: VolumeTarget::Uniform(body.volume) })
         .map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
     if let Some(muted) = body.muted {
         // The client always sends `muted`, so a failure here is a real partial
