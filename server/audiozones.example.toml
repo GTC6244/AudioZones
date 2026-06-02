@@ -1,0 +1,5 @@
+# Copy to `audiozones.toml` and `chmod 600` it (holds the token). If absent, the
+# server uses dev defaults (127.0.0.1:4040, token "dev-token", ./zones.toml).
+bind = "0.0.0.0:4040"     # LAN; the token still gates every request + the WS
+token = "change-me-to-a-long-random-string"
+zones_file = "./zones.toml"

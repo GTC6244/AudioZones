@@ -1,0 +1,30 @@
+[package]
+name = "audiozones-server"
+version = "0.1.0"
+edition = "2021"
+
+# The AudioZones control-plane server. Architecture (from the design doc):
+#   PwBackend trait  <- MockBackend (runs anywhere) | PipewireBackend (Linux, later)
+#   model::reconcile drives actual graph -> active zones' desired state
+#   axum REST (commands) + WebSocket (full-snapshot push), bearer-token gated
+#   zones + config persisted as hand-editable TOML
+#
+# Builds on macOS today via the mock backend. The real pipewire-rs backend goes
+# behind `--features pipewire-backend` once the spike settles raw-pw vs WirePlumber.
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.7", features = ["ws"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+schemars = "0.8"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+pipewire = { version = "0.8", optional = true }
+
+[features]
+default = []
+# Real PipeWire backend (Linux only). Off by default so macOS builds the mock.
+pipewire-backend = ["dep:pipewire"]

@@ -1,0 +1,12 @@
+[package]
+name = "audiozones-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Throwaway de-risking spike for the AudioZones server. NOT part of the real build.
+# Answers the 4 questions from the design doc's "The Assignment" section.
+# Must be built and run on a LINUX box with PipeWire + WirePlumber running.
+
+[dependencies]
+pipewire = "0.8"

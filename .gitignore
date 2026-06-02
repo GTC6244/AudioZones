@@ -1,0 +1,8 @@
+# Rust build artifacts
+**/target/
+
+# Stray macOS build output at repo root (Flutter builds live under app/)
+/build/
+
+# Editor / OS cruft
+.DS_Store

@@ -1,0 +1,18 @@
+version = 1
+active = []
+
+[[zones]]
+name = "patio"
+
+[[zones.links]]
+output_port = "Audio/Source|USB Capture#out:capture_FL"
+input_port = "Audio/Sink|Patio Amp#in:playback_FL"
+
+[[zones.links]]
+output_port = "Audio/Source|USB Capture#out:capture_FR"
+input_port = "Audio/Sink|Patio Amp#in:playback_FR"
+
+[[zones.volumes]]
+node_key = "Audio/Sink|Patio Amp"
+volume = 0.5
+muted = false

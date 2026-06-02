@@ -1,0 +1,152 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "GraphState",
+  "description": "Everything a client needs to render, in one message.",
+  "type": "object",
+  "required": [
+    "connected",
+    "links",
+    "nodes",
+    "zones"
+  ],
+  "properties": {
+    "connected": {
+      "description": "True when the server is talking to a live PipeWire (false = degraded/mock).",
+      "type": "boolean"
+    },
+    "links": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/LinkView"
+      }
+    },
+    "nodes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/NodeView"
+      }
+    },
+    "zones": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ZoneView"
+      }
+    }
+  },
+  "definitions": {
+    "Direction": {
+      "type": "string",
+      "enum": [
+        "in",
+        "out"
+      ]
+    },
+    "LinkView": {
+      "type": "object",
+      "required": [
+        "input_port",
+        "output_port"
+      ],
+      "properties": {
+        "input_port": {
+          "type": "string"
+        },
+        "output_port": {
+          "type": "string"
+        }
+      }
+    },
+    "NodeView": {
+      "type": "object",
+      "required": [
+        "key",
+        "media_class",
+        "muted",
+        "name",
+        "ports",
+        "present"
+      ],
+      "properties": {
+        "key": {
+          "description": "Stable key: `(node.name, media.class)[+serial]`. Survives reconnect; numeric PipeWire ids do not. See `identity`.",
+          "type": "string"
+        },
+        "media_class": {
+          "type": "string"
+        },
+        "muted": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        },
+        "ports": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PortView"
+          }
+        },
+        "present": {
+          "description": "False when the device is not currently present (unplugged); zones depending on it show \"degraded\".",
+          "type": "boolean"
+        },
+        "volume": {
+          "description": "0.0..=1.0. `None` if this node has no volume control.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
+        }
+      }
+    },
+    "PortView": {
+      "type": "object",
+      "required": [
+        "direction",
+        "key",
+        "name"
+      ],
+      "properties": {
+        "direction": {
+          "$ref": "#/definitions/Direction"
+        },
+        "key": {
+          "description": "Stable key: `(node_key, port.name, direction)`.",
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      }
+    },
+    "ZoneView": {
+      "type": "object",
+      "required": [
+        "active",
+        "degraded",
+        "missing",
+        "name"
+      ],
+      "properties": {
+        "active": {
+          "type": "boolean"
+        },
+        "degraded": {
+          "description": "True when the zone is active but some of its devices/ports are missing.",
+          "type": "boolean"
+        },
+        "missing": {
+          "description": "Stable keys of devices the zone wants but can't currently reach.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "name": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}
