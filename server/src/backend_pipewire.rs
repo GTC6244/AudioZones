@@ -8,8 +8,9 @@
 //! Verified on real hardware (box 192.168.1.25): WirePlumber leaves device links alone,
 //! and `create_object("link-factory")` from another thread works.
 //!
-//! INCREMENT 1: read path (nodes/ports/links) + link create/destroy.
-//! TODO INCREMENT 2: volume via the node's `Props.channelVolumes` SPA POD (Q4 target).
+//! Implemented: read path (nodes/ports/links), link create/destroy, and volume/mute
+//! via the node's `Props.channelVolumes`/`mute` SPA POD (read through a per-node Props
+//! listener, written via `set_node_props`).
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -447,8 +448,10 @@ fn set_node_props(node: &pw::node::Node, channel_volumes: Option<Vec<f32>>, mute
     }
 }
 
-/// Decode a node `Props` POD into (representative volume, mute). Volume = the max of
-/// `channelVolumes` (falling back to the scalar `volume`). Returns None if neither is present.
+/// Decode a node `Props` POD into (representative volume, mute). Volume is derived
+/// ONLY from `channelVolumes` (the max channel); the scalar `SPA_PROP_volume` is
+/// intentionally ignored. Returns `None` when the POD carries neither channelVolumes
+/// nor mute, so unrelated Props emissions don't trigger redundant snapshot broadcasts.
 fn decode_props(pod: &pw::spa::pod::Pod) -> Option<(Option<f32>, Option<bool>)> {
     use pw::spa::pod::{deserialize::PodDeserializer, Value, ValueArray};
 
@@ -474,6 +477,11 @@ fn decode_props(pod: &pw::spa::pod::Pod) -> Option<(Option<f32>, Option<bool>)> 
             }
             _ => {}
         }
+    }
+    // Nothing relevant in this Props emission — signal "no change" so the caller skips
+    // the model update and the broadcast it would otherwise trigger.
+    if volume.is_none() && mute.is_none() {
+        return None;
     }
     Some((volume, mute))
 }

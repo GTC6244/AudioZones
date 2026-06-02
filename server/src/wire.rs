@@ -23,8 +23,8 @@ pub struct GraphState {
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct NodeView {
-    /// Stable key: `(node.name, media.class)[+serial]`. Survives reconnect; numeric
-    /// PipeWire ids do not. See `identity`.
+    /// Stable key: `media.class|node.name`. Survives reconnect; numeric PipeWire ids
+    /// do not. Deliberately excludes `object.serial` (per-session, not durable). See `identity`.
     pub key: String,
     pub name: String,
     pub media_class: String,

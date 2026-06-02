@@ -62,8 +62,8 @@ class LinkView {
 
 class NodeView {
     
-    ///Stable key: `(node.name, media.class)[+serial]`. Survives reconnect; numeric PipeWire ids
-    ///do not. See `identity`.
+    ///Stable key: `media.class|node.name`. Survives reconnect; numeric PipeWire ids do not.
+    ///Deliberately excludes `object.serial` (per-session, not durable). See `identity`.
     String key;
     String mediaClass;
     bool muted;
