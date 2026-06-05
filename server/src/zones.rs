@@ -20,6 +20,10 @@ pub enum ZoneError {
     Serialize(#[from] toml::ser::Error),
     #[error("no such zone: {0}")]
     NoSuchZone(String),
+    #[error("zone already exists: {0}")]
+    ZoneExists(String),
+    #[error("invalid zone: {0}")]
+    InvalidZone(String),
 }
 
 /// One link inside a zone, addressed by stable port keys.
@@ -148,6 +152,70 @@ impl ZoneStore {
         self.zones.iter().find(|z| z.name == name)
     }
 
+    /// Add a new zone definition. The name is the zone's identity (`get`/`set_active`
+    /// key off it), so reject an empty name and a duplicate. The stored name is trimmed.
+    /// Caller is responsible for `save()`.
+    pub fn add_zone(&mut self, mut zone: ZoneDef) -> Result<(), ZoneError> {
+        let name = zone.name.trim().to_string();
+        if name.is_empty() {
+            return Err(ZoneError::InvalidZone("zone name must not be empty".into()));
+        }
+        if self.get(&name).is_some() {
+            return Err(ZoneError::ZoneExists(name));
+        }
+        zone.name = name;
+        self.zones.push(zone);
+        Ok(())
+    }
+
+    /// Edit a zone's name and links in place, preserving its volumes. The new name is
+    /// trimmed; an empty one is rejected, and a rename can't collide with a *different*
+    /// existing zone. On rename, the active-set entry is moved so an active zone stays
+    /// active under its new name. Caller saves.
+    pub fn update_zone(
+        &mut self,
+        current: &str,
+        new_name: &str,
+        links: Vec<LinkSpec>,
+    ) -> Result<(), ZoneError> {
+        let new_name = new_name.trim().to_string();
+        if new_name.is_empty() {
+            return Err(ZoneError::InvalidZone("zone name must not be empty".into()));
+        }
+        if self.get(current).is_none() {
+            return Err(ZoneError::NoSuchZone(current.to_string()));
+        }
+        if new_name != current && self.get(&new_name).is_some() {
+            return Err(ZoneError::ZoneExists(new_name));
+        }
+        {
+            let zone = self.zones.iter_mut().find(|z| z.name == current).unwrap();
+            zone.name = new_name.clone();
+            zone.links = links;
+        }
+        if new_name != current {
+            for n in self.active.iter_mut() {
+                if n == current {
+                    *n = new_name.clone();
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Remove a zone by name, also dropping it from the active set. Errors if unknown.
+    /// Note: this does not tear down any links the zone created — reconcile only *creates*
+    /// links (conservative v1, see `model::reconcile`), so a deleted zone's live links
+    /// linger until removed in the Graph lens, exactly as deactivating one does. Caller saves.
+    pub fn remove_zone(&mut self, name: &str) -> Result<(), ZoneError> {
+        if self.get(name).is_none() {
+            return Err(ZoneError::NoSuchZone(name.to_string()));
+        }
+        self.zones.retain(|z| z.name != name);
+        self.active.retain(|n| n != name);
+        Ok(())
+    }
+
     pub fn is_active(&self, name: &str) -> bool {
         self.active.iter().any(|n| n == name)
     }
@@ -260,6 +328,136 @@ mod tests {
             ChannelVolume { channel: 7, volume: 0.6 },
         ]);
         let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn add_zone_appends_and_trims_name() {
+        let p = tmpfile("addzone");
+        let _ = std::fs::remove_file(&p);
+        let mut store = ZoneStore::load(&p).unwrap();
+        store
+            .add_zone(ZoneDef {
+                name: "  patio  ".into(),
+                links: vec![LinkSpec {
+                    output_port: "Audio/Source|Cap#out:capture_FL".into(),
+                    input_port: "Audio/Sink|Amp#in:playback_FL".into(),
+                }],
+                volumes: vec![],
+            })
+            .unwrap();
+        assert_eq!(store.zones.len(), 1);
+        // Trimmed name is what's stored and what `get` keys off.
+        assert!(store.get("patio").is_some());
+    }
+
+    #[test]
+    fn add_zone_rejects_duplicate_name() {
+        let p = tmpfile("dupzone");
+        let _ = std::fs::remove_file(&p);
+        let mut store = ZoneStore::load(&p).unwrap();
+        let z = || ZoneDef { name: "patio".into(), links: vec![], volumes: vec![] };
+        store.add_zone(z()).unwrap();
+        assert!(matches!(store.add_zone(z()), Err(ZoneError::ZoneExists(_))));
+        assert_eq!(store.zones.len(), 1);
+    }
+
+    #[test]
+    fn add_zone_rejects_empty_name() {
+        let p = tmpfile("emptyname");
+        let _ = std::fs::remove_file(&p);
+        let mut store = ZoneStore::load(&p).unwrap();
+        let r = store.add_zone(ZoneDef { name: "   ".into(), links: vec![], volumes: vec![] });
+        assert!(matches!(r, Err(ZoneError::InvalidZone(_))));
+        assert!(store.zones.is_empty());
+    }
+
+    #[test]
+    fn update_zone_replaces_links_and_keeps_volumes() {
+        let p = tmpfile("updatelinks");
+        let _ = std::fs::remove_file(&p);
+        let mut store = ZoneStore::load(&p).unwrap();
+        store
+            .add_zone(ZoneDef {
+                name: "patio".into(),
+                links: vec![LinkSpec { output_port: "OUT1".into(), input_port: "IN1".into() }],
+                volumes: vec![VolumeSpec {
+                    node_key: "AMP".into(),
+                    volume: Some(0.5),
+                    channels: vec![],
+                    muted: false,
+                }],
+            })
+            .unwrap();
+        // Links-only edit (same name): swap the link set.
+        store
+            .update_zone(
+                "patio",
+                "patio",
+                vec![
+                    LinkSpec { output_port: "OUT2".into(), input_port: "IN2".into() },
+                    LinkSpec { output_port: "OUT3".into(), input_port: "IN3".into() },
+                ],
+            )
+            .unwrap();
+        let z = store.get("patio").unwrap();
+        assert_eq!(z.links.len(), 2);
+        assert_eq!(z.links[0].output_port, "OUT2");
+        // Volumes are untouched by an edit.
+        assert_eq!(z.volumes[0].volume, Some(0.5));
+    }
+
+    #[test]
+    fn update_zone_rename_moves_active_entry() {
+        let p = tmpfile("updaterename");
+        let _ = std::fs::remove_file(&p);
+        let mut store = ZoneStore::load(&p).unwrap();
+        store.add_zone(ZoneDef { name: "patio".into(), links: vec![], volumes: vec![] }).unwrap();
+        store.set_active("patio", true).unwrap();
+
+        store
+            .update_zone("patio", "  deck  ", vec![LinkSpec { output_port: "O".into(), input_port: "I".into() }])
+            .unwrap();
+
+        assert!(store.get("patio").is_none());
+        assert!(store.get("deck").is_some()); // trimmed
+        assert!(store.is_active("deck")); // active-ness followed the rename
+        assert!(!store.is_active("patio"));
+    }
+
+    #[test]
+    fn update_zone_rejects_rename_collision_and_unknown() {
+        let p = tmpfile("updatecollide");
+        let _ = std::fs::remove_file(&p);
+        let mut store = ZoneStore::load(&p).unwrap();
+        store.add_zone(ZoneDef { name: "patio".into(), links: vec![], volumes: vec![] }).unwrap();
+        store.add_zone(ZoneDef { name: "deck".into(), links: vec![], volumes: vec![] }).unwrap();
+
+        // Renaming patio -> deck collides with the existing deck.
+        let collide = store.update_zone("patio", "deck", vec![]);
+        assert!(matches!(collide, Err(ZoneError::ZoneExists(_))));
+        // Editing a zone that doesn't exist.
+        let missing = store.update_zone("ghost", "ghost", vec![]);
+        assert!(matches!(missing, Err(ZoneError::NoSuchZone(_))));
+        // Empty new name.
+        let empty = store.update_zone("patio", "  ", vec![]);
+        assert!(matches!(empty, Err(ZoneError::InvalidZone(_))));
+        // patio unchanged after the failed attempts.
+        assert!(store.get("patio").is_some());
+    }
+
+    #[test]
+    fn remove_zone_drops_definition_and_active_entry() {
+        let p = tmpfile("removezone");
+        let _ = std::fs::remove_file(&p);
+        let mut store = ZoneStore::load(&p).unwrap();
+        store.add_zone(ZoneDef { name: "patio".into(), links: vec![], volumes: vec![] }).unwrap();
+        store.set_active("patio", true).unwrap();
+        assert!(store.is_active("patio"));
+
+        store.remove_zone("patio").unwrap();
+        assert!(store.get("patio").is_none());
+        assert!(!store.is_active("patio"));
+        assert!(matches!(store.remove_zone("patio"), Err(ZoneError::NoSuchZone(_))));
     }
 
     #[test]

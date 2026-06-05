@@ -134,6 +134,7 @@
       "required": [
         "active",
         "degraded",
+        "links",
         "missing",
         "muted",
         "name"
@@ -145,6 +146,13 @@
         "degraded": {
           "description": "True when the zone is active but some of its devices/ports are missing.",
           "type": "boolean"
+        },
+        "links": {
+          "description": "The zone's defined links (its routing recipe) — independent of what's currently live in the graph. Lets a client edit the zone (add/remove links) without a separate fetch. Distinct from top-level `GraphState.links`, which are live links.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/LinkView"
+          }
         },
         "missing": {
           "description": "Stable keys of devices the zone wants but can't currently reach.",

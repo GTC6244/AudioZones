@@ -66,6 +66,10 @@ pub struct LinkView {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ZoneView {
     pub name: String,
+    /// The zone's defined links (its routing recipe) — independent of what's currently
+    /// live in the graph. Lets a client edit the zone (add/remove links) without a
+    /// separate fetch. Distinct from top-level `GraphState.links`, which are live links.
+    pub links: Vec<LinkView>,
     pub active: bool,
     /// True when the zone is active but some of its devices/ports are missing.
     pub degraded: bool,

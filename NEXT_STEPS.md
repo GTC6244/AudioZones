@@ -1,13 +1,13 @@
 # AudioZones — Next Steps
 
-Status as of 2026-06-02. The system works end-to-end on real hardware (Ubuntu box
+Status as of 2026-06-04. The system works end-to-end on real hardware (Ubuntu box
 `192.168.1.25`, PipeWire 1.0.5 + WirePlumber, StarTech ICUSBAUDIO7D / CM106 8-channel
 USB card). Full design + decisions: `~/.gstack/projects/audiozones/GTC6244-amarillo-design-*.md`
 (mirrored in `.context/`).
 
 ## Done (verified on hardware)
 - Rust server (`server/`): full PipeWire graph model, snapshot-only WebSocket, REST,
-  bearer auth, reconcile-driven zones, TOML persistence. 18 unit tests pass.
+  bearer auth, reconcile-driven zones, TOML persistence. 29 unit tests pass.
 - Real `PipewireBackend` (`--features pipewire-backend`): read live graph, create/destroy
   links, set volume/mute (`Props.channelVolumes`), read live volume back. All exercised
   against the 8-ch card.
@@ -27,6 +27,16 @@ USB card). Full design + decisions: `~/.gstack/projects/audiozones/GTC6244-amari
   unlisted channels. NodeView now exposes `channel_volumes`. **Box-verified** on the 8-ch
   card: a zone with `channels=[{6,0.6},{7,0.6}]` moved only channels 6-7 to 0.6 and left
   0-5 at 0.5; a uniform PUT drove all 8 channels.
+- **Zone management from the app (create / edit / delete).** Zones were TOML-only; the app
+  can now build and manage them. `POST /zones` (create, inactive), `PUT /zones/:name`
+  (rename + add/remove links, preserving volumes; an active zone stays active under its new
+  name), `DELETE /zones/:name`. `ZoneStore` enforces unique, non-empty names. The shared
+  `ZoneEditorScreen` (FAB + tile "Edit"/"Delete") drives them; the link picker filters
+  destinations to input ports containing "playback". `ZoneView` now carries `links` so the
+  editor prefills without a fetch. Built from the **live graph**, so new zones reference
+  real present port keys (sidesteps the #9 stale-key caveat). The Android release manifest
+  now includes the `INTERNET` permission (release builds couldn't reach the server without
+  it). Box-deployed + phone-verified.
 - **Two-identical-card identity (#9).** `node_key` folds in a port-position-stable hardware
   path so two same-model cards no longer collide. The path is `device.bus-path` (USB/PCI
   port), read by **binding the Device proxy and reading its INFO props** — the registry

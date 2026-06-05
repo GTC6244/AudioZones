@@ -158,6 +158,11 @@ class ZoneView {
     ///True when the zone is active but some of its devices/ports are missing.
     bool degraded;
     
+    ///The zone's defined links (its routing recipe) — independent of what's currently live in
+    ///the graph. Lets a client edit the zone (add/remove links) without a separate fetch.
+    ///Distinct from top-level `GraphState.links`, which are live links.
+    List<LinkView> links;
+    
     ///Stable keys of devices the zone wants but can't currently reach.
     List<String> missing;
     
@@ -177,6 +182,7 @@ class ZoneView {
     ZoneView({
         required this.active,
         required this.degraded,
+        required this.links,
         required this.missing,
         required this.muted,
         required this.name,
@@ -187,6 +193,7 @@ class ZoneView {
     factory ZoneView.fromJson(Map<String, dynamic> json) => ZoneView(
         active: json["active"],
         degraded: json["degraded"],
+        links: List<LinkView>.from(json["links"].map((x) => LinkView.fromJson(x))),
         missing: List<String>.from(json["missing"].map((x) => x)),
         muted: json["muted"],
         name: json["name"],
@@ -197,6 +204,7 @@ class ZoneView {
     Map<String, dynamic> toJson() => {
         "active": active,
         "degraded": degraded,
+        "links": List<dynamic>.from(links.map((x) => x.toJson())),
         "missing": List<dynamic>.from(missing.map((x) => x)),
         "muted": muted,
         "name": name,

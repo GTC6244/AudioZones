@@ -4,6 +4,7 @@ import '../app_state.dart';
 import '../generated/protocol.dart';
 import '../theme.dart';
 import '../volume.dart';
+import 'zone_editor_screen.dart';
 
 /// Zone lens — the primary, daily surface. Adaptive: a list of big tiles on a phone,
 /// a multi-column grid on a tablet/landscape (the wall-panel form factor). On/off is
@@ -53,8 +54,18 @@ class ZonesScreen extends StatelessWidget {
             const Text('No zones yet'),
             const SizedBox(height: 4),
             Text(
-              'Define zones in zones.toml on the server.',
+              'Create a zone to route a source into your speakers.',
               style: Theme.of(context).textTheme.bodySmall,
+            ),
+            const SizedBox(height: 16),
+            FilledButton.icon(
+              onPressed: () => Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) => ZoneEditorScreen(state: state),
+                ),
+              ),
+              icon: const Icon(Icons.add),
+              label: const Text('Create zone'),
             ),
           ],
         ),
@@ -103,6 +114,23 @@ class _ZoneTile extends StatelessWidget {
                   activeThumbColor: kAccentOn,
                   onChanged: (_) => state.toggleZone(zone),
                 ),
+                PopupMenuButton<String>(
+                  tooltip: 'Zone options',
+                  onSelected: (v) {
+                    if (v == 'edit') {
+                      Navigator.of(context).push(MaterialPageRoute(
+                        builder: (_) =>
+                            ZoneEditorScreen(state: state, existing: zone),
+                      ));
+                    } else if (v == 'delete') {
+                      _confirmDelete(context);
+                    }
+                  },
+                  itemBuilder: (_) => const [
+                    PopupMenuItem(value: 'edit', child: Text('Edit zone')),
+                    PopupMenuItem(value: 'delete', child: Text('Delete zone')),
+                  ],
+                ),
               ],
             ),
             const Spacer(),
@@ -111,6 +139,37 @@ class _ZoneTile extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  // Deleting a zone removes its definition; any links it created stay until removed in
+  // the Graph lens (reconcile only creates links — same as deactivating). We say so here.
+  Future<void> _confirmDelete(BuildContext context) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Delete "${zone.name}"?'),
+        content: const Text(
+            'This removes the zone definition. Any links it created stay until you '
+            'remove them in the Graph tab.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    try {
+      await state.deleteZone(zone);
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('Could not delete zone: $e')));
+    }
   }
 
   // Zone volume: drives the representative node via `volumeNode`. Slider rides in

@@ -23,8 +23,8 @@ use tokio::sync::broadcast;
 
 use crate::backend::PwBackend;
 use crate::model::{self, Action, VolumeTarget};
-use crate::wire::{GraphState, ZoneView};
-use crate::zones::ZoneStore;
+use crate::wire::{GraphState, LinkView, ZoneView};
+use crate::zones::{LinkSpec, ZoneDef, ZoneError, ZoneStore};
 
 pub struct AppState {
     pub backend: Arc<dyn PwBackend>,
@@ -58,6 +58,14 @@ pub fn compose(state: &AppState) -> GraphState {
                 .unwrap_or((None, false));
             ZoneView {
                 name: z.name.clone(),
+                links: z
+                    .links
+                    .iter()
+                    .map(|l| LinkView {
+                        output_port: l.output_port.clone(),
+                        input_port: l.input_port.clone(),
+                    })
+                    .collect(),
                 active,
                 degraded: !missing.is_empty(),
                 missing,
@@ -92,7 +100,8 @@ pub fn reconcile_and_apply(state: &AppState) {
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/graph", get(get_graph))
-        .route("/zones", get(get_zones))
+        .route("/zones", get(get_zones).post(create_zone))
+        .route("/zones/:name", put(update_zone).delete(delete_zone))
         .route("/zones/:name/activate", post(activate))
         .route("/zones/:name/deactivate", post(deactivate))
         .route("/nodes/:key/volume", put(set_volume))
@@ -144,6 +153,101 @@ async fn get_graph(State(s): State<Arc<AppState>>) -> Json<GraphState> {
 
 async fn get_zones(State(s): State<Arc<AppState>>) -> Json<Vec<ZoneView>> {
     Json(compose(&s).zones)
+}
+
+/// Body for create (`POST /zones`) and edit (`PUT /zones/:name`): a name + the zone's
+/// links. On edit, `name` is the (possibly new) name and the path carries the current one.
+#[derive(Deserialize)]
+struct ZoneBody {
+    name: String,
+    links: Vec<LinkBody>,
+}
+
+fn link_specs(links: Vec<LinkBody>) -> Vec<LinkSpec> {
+    links
+        .into_iter()
+        .map(|l| LinkSpec { output_port: l.output_port, input_port: l.input_port })
+        .collect()
+}
+
+/// Create a new (inactive) zone from a name + its links. The client toggles it on
+/// afterward via `/activate`. Volumes aren't set here — a zone with links auto-derives
+/// its representative volume node from the first link's sink (see `ZoneDef::primary_node`).
+async fn create_zone(
+    State(s): State<Arc<AppState>>,
+    Json(body): Json<ZoneBody>,
+) -> Result<Json<Vec<ZoneView>>, ApiError> {
+    if body.links.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "a zone needs at least one link".into()));
+    }
+    let zone = ZoneDef {
+        name: body.name,
+        links: link_specs(body.links),
+        volumes: Vec::new(),
+    };
+    {
+        let mut store = s.zones.lock().unwrap();
+        store.add_zone(zone).map_err(|e| match e {
+            ZoneError::ZoneExists(_) => (StatusCode::CONFLICT, e.to_string()),
+            ZoneError::InvalidZone(_) => (StatusCode::BAD_REQUEST, e.to_string()),
+            other => (StatusCode::INTERNAL_SERVER_ERROR, other.to_string()),
+        })?;
+        store
+            .save()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+    // New zone is inactive, so nothing to reconcile — just push the updated list.
+    publish(&s);
+    Ok(Json(compose(&s).zones))
+}
+
+/// Edit a zone's name and/or links (volumes are preserved). The path is the current name;
+/// `body.name` is what to rename to (same value = links-only edit). A rename can't collide
+/// with another zone, and an active zone stays active under its new name.
+async fn update_zone(
+    State(s): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<ZoneBody>,
+) -> Result<Json<Vec<ZoneView>>, ApiError> {
+    if body.links.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "a zone needs at least one link".into()));
+    }
+    {
+        let mut store = s.zones.lock().unwrap();
+        store
+            .update_zone(&name, &body.name, link_specs(body.links))
+            .map_err(|e| match e {
+                ZoneError::ZoneExists(_) => (StatusCode::CONFLICT, e.to_string()),
+                ZoneError::InvalidZone(_) => (StatusCode::BAD_REQUEST, e.to_string()),
+                ZoneError::NoSuchZone(_) => (StatusCode::NOT_FOUND, e.to_string()),
+                other => (StatusCode::INTERNAL_SERVER_ERROR, other.to_string()),
+            })?;
+        store
+            .save()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+    // Links may have changed; reconcile so a newly-added link on an active zone is created.
+    // (Removed links linger until torn down in the Graph lens — reconcile only creates.)
+    reconcile_and_apply(&s);
+    publish(&s);
+    Ok(Json(compose(&s).zones))
+}
+
+async fn delete_zone(
+    State(s): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> Result<Json<Vec<ZoneView>>, ApiError> {
+    {
+        let mut store = s.zones.lock().unwrap();
+        store
+            .remove_zone(&name)
+            .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
+        store
+            .save()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+    publish(&s);
+    Ok(Json(compose(&s).zones))
 }
 
 async fn activate(State(s): State<Arc<AppState>>, Path(name): Path<String>) -> Result<Json<Vec<ZoneView>>, ApiError> {
