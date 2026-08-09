@@ -94,9 +94,14 @@ pub fn reconcile(desired: &Desired, actual: &GraphState) -> Vec<Action> {
         .flat_map(|n| n.ports.iter().map(|p| p.key.as_str()))
         .collect();
 
-    // Create desired links whose endpoints both exist and aren't already linked.
+    // Create desired links whose endpoints both exist and aren't already linked. Never
+    // create a self-loop (both ports on the same node — a sink's monitor->playback), which
+    // feeds the device's output back into itself (feedback). Such a link can only come from
+    // a hand-edited/legacy zones.toml; the API rejects it on create/edit.
     for (out, inp) in &desired.links {
-        if !actual_links.contains(&(out.clone(), inp.clone()))
+        let self_loop = out.split('#').next() == inp.split('#').next();
+        if !self_loop
+            && !actual_links.contains(&(out.clone(), inp.clone()))
             && present_ports.contains(out.as_str())
             && present_ports.contains(inp.as_str())
         {
@@ -207,7 +212,7 @@ mod tests {
         }
     }
     fn port(key: &str, dir: Direction) -> PortView {
-        PortView { key: key.into(), name: key.into(), direction: dir }
+        PortView { key: key.into(), name: key.into(), direction: dir, channel: None }
     }
 
     fn store_with_active_patio() -> ZoneStore {
@@ -330,6 +335,42 @@ mod tests {
             ..Default::default()
         };
         assert!(reconcile(&desired, &satisfied).is_empty());
+    }
+
+    #[test]
+    fn reconcile_skips_self_loop_link() {
+        // A monitor->playback link on the SAME node is a feedback loop — never create it,
+        // even if a (legacy/hand-edited) zone asks for it and both ports are present.
+        let p = std::env::temp_dir().join("audiozones-selfloop.toml");
+        let _ = std::fs::remove_file(&p);
+        let mut store = ZoneStore::load(&p).unwrap();
+        store.zones.push(ZoneDef {
+            name: "loop".into(),
+            links: vec![LinkSpec {
+                output_port: "Audio/Sink|Amp#out:monitor_FL".into(),
+                input_port: "Audio/Sink|Amp#in:playback_FL".into(),
+            }],
+            volumes: vec![],
+        });
+        store.set_active("loop", true).unwrap();
+        let desired = desired_from_active(&store);
+        let actual = GraphState {
+            nodes: vec![node(
+                "Audio/Sink|Amp",
+                None,
+                true,
+                vec![
+                    port("Audio/Sink|Amp#out:monitor_FL", Direction::Out),
+                    port("Audio/Sink|Amp#in:playback_FL", Direction::In),
+                ],
+            )],
+            ..Default::default()
+        };
+        let actions = reconcile(&desired, &actual);
+        assert!(
+            !actions.iter().any(|a| matches!(a, Action::CreateLink { .. })),
+            "self-loop link must not be created, got {actions:?}"
+        );
     }
 
     #[test]

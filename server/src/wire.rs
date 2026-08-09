@@ -48,6 +48,12 @@ pub struct PortView {
     pub key: String,
     pub name: String,
     pub direction: Direction,
+    /// Channel index into the owning node's `channel_volumes` (= PipeWire `port.id`, which
+    /// matches the node's `audio.position` order). Lets a zone drive only the channels its
+    /// links feed (e.g. a sink's RL/RR ports -> channels 2/3). `None` if the port reported
+    /// no index (stream nodes, mock). Box-checked: port.id == channel_volumes index.
+    #[serde(default)]
+    pub channel: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
