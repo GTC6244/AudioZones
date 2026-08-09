@@ -427,18 +427,34 @@ async fn set_zone_volume(
         zone_volume_target(zone, &snap)
             .ok_or((StatusCode::UNPROCESSABLE_ENTITY, "zone has no controllable destination".to_string()))?
     };
-    let target = if channels.is_empty() {
-        VolumeTarget::Uniform(body.volume)
+    let active = { s.zones.lock().unwrap().is_active(&name) };
+    // Persist the level onto the zone so the reconcile loop re-asserts THIS value instead of
+    // reverting it (and it survives a restart). See `set_volume` for the full rationale.
+    {
+        let mut store = s.zones.lock().unwrap();
+        store.upsert_zone_volume(&name, &node_key, &channels, body.volume, body.muted);
+        store
+            .save()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+    if active {
+        // reconcile drives the backend to the newly-stored desired for this active zone.
+        reconcile_and_apply(&s);
     } else {
-        VolumeTarget::Channels(channels.into_iter().map(|c| (c, body.volume)).collect())
-    };
-    s.backend
-        .apply(Action::SetVolume { node_key: node_key.clone(), target })
-        .map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
-    if let Some(muted) = body.muted {
+        // Inactive zone: reconcile ignores it, so apply the one-off change directly.
+        let target = if channels.is_empty() {
+            VolumeTarget::Uniform(body.volume)
+        } else {
+            VolumeTarget::Channels(channels.into_iter().map(|c| (c, body.volume)).collect())
+        };
         s.backend
-            .apply(Action::SetMute { node_key, muted })
+            .apply(Action::SetVolume { node_key: node_key.clone(), target })
             .map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
+        if let Some(muted) = body.muted {
+            s.backend
+                .apply(Action::SetMute { node_key, muted })
+                .map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
+        }
     }
     publish(&s);
     Ok(StatusCode::NO_CONTENT)
@@ -449,15 +465,35 @@ async fn set_volume(
     Path(key): Path<String>,
     Json(body): Json<VolumeBody>,
 ) -> Result<StatusCode, ApiError> {
-    s.backend
-        .apply(Action::SetVolume { node_key: key.clone(), target: VolumeTarget::Uniform(body.volume) })
-        .map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
-    if let Some(muted) = body.muted {
-        // The client always sends `muted`, so a failure here is a real partial
-        // apply — surface it instead of returning 204 for a half-applied command.
+    // Persist the level onto the active zones that own this node BEFORE touching the backend.
+    // The relay loop reconciles active zones on every backend graph change, and a `SetVolume`
+    // is itself such a change — so if the stored volume still held the old value, reconcile
+    // would instantly revert the slider. With the store updated first, reconcile re-asserts the
+    // requested level (and it now survives a restart). Falls back to a direct apply when no
+    // active zone governs the node.
+    let persisted = {
+        let mut store = s.zones.lock().unwrap();
+        let changed = store.set_node_volume(&key, body.volume, body.muted);
+        if changed {
+            store
+                .save()
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        }
+        changed
+    };
+    if persisted {
+        reconcile_and_apply(&s);
+    } else {
         s.backend
-            .apply(Action::SetMute { node_key: key, muted })
+            .apply(Action::SetVolume { node_key: key.clone(), target: VolumeTarget::Uniform(body.volume) })
             .map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
+        if let Some(muted) = body.muted {
+            // The client always sends `muted`, so a failure here is a real partial
+            // apply — surface it instead of returning 204 for a half-applied command.
+            s.backend
+                .apply(Action::SetMute { node_key: key, muted })
+                .map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
+        }
     }
     publish(&s);
     Ok(StatusCode::NO_CONTENT)

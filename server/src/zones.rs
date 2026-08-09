@@ -152,6 +152,77 @@ impl ZoneStore {
         self.zones.iter().find(|z| z.name == name)
     }
 
+    /// Persist a uniform volume/mute for `node_key` onto every ACTIVE zone that controls it
+    /// as its representative node — the `PUT /nodes/:key/volume` (whole-node) path. The relay
+    /// loop re-asserts each active zone's STORED volume on every backend graph change, and a
+    /// `SetVolume` is itself such a change, so unless the stored value is updated here the
+    /// slider snaps straight back to the old level (and nothing is remembered across a
+    /// restart). Replaces any prior spec for the node, clearing per-channel overrides.
+    /// Returns true if any zone changed; the caller is responsible for `save()`.
+    pub fn set_node_volume(&mut self, node_key: &str, volume: f32, muted: Option<bool>) -> bool {
+        let active = self.active.clone();
+        let mut changed = false;
+        for zone in self.zones.iter_mut() {
+            if !active.iter().any(|n| n == &zone.name) {
+                continue;
+            }
+            if zone.primary_node().as_deref() != Some(node_key) {
+                continue;
+            }
+            let prev_muted = zone
+                .volumes
+                .iter()
+                .find(|v| v.node_key == node_key)
+                .map(|v| v.muted)
+                .unwrap_or(false);
+            zone.volumes.retain(|v| v.node_key != node_key);
+            zone.volumes.push(VolumeSpec {
+                node_key: node_key.to_string(),
+                volume: Some(volume),
+                channels: Vec::new(),
+                muted: muted.unwrap_or(prev_muted),
+            });
+            changed = true;
+        }
+        changed
+    }
+
+    /// Persist a volume/mute for `zone`'s destination `node_key` — the `PUT /zones/:name/volume`
+    /// (per-zone) path. `channels` empty => uniform; non-empty => per-channel at `volume`, so
+    /// zones sharing one card stay independent. Same rationale as [`set_node_volume`]: reconcile
+    /// re-asserts the stored value, so it must be updated or the change reverts. Replaces any
+    /// prior spec for the node. Returns false if no such zone; the caller saves.
+    pub fn upsert_zone_volume(
+        &mut self,
+        zone: &str,
+        node_key: &str,
+        channels: &[usize],
+        volume: f32,
+        muted: Option<bool>,
+    ) -> bool {
+        let Some(z) = self.zones.iter_mut().find(|z| z.name == zone) else {
+            return false;
+        };
+        let prev_muted = z
+            .volumes
+            .iter()
+            .find(|v| v.node_key == node_key)
+            .map(|v| v.muted)
+            .unwrap_or(false);
+        let spec = VolumeSpec {
+            node_key: node_key.to_string(),
+            volume: if channels.is_empty() { Some(volume) } else { None },
+            channels: channels
+                .iter()
+                .map(|&c| ChannelVolume { channel: c, volume })
+                .collect(),
+            muted: muted.unwrap_or(prev_muted),
+        };
+        z.volumes.retain(|v| v.node_key != node_key);
+        z.volumes.push(spec);
+        true
+    }
+
     /// Add a new zone definition. The name is the zone's identity (`get`/`set_active`
     /// key off it), so reject an empty name and a duplicate. The stored name is trimmed.
     /// Caller is responsible for `save()`.
@@ -327,6 +398,64 @@ mod tests {
             ChannelVolume { channel: 6, volume: 0.6 },
             ChannelVolume { channel: 7, volume: 0.6 },
         ]);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn set_node_volume_persists_uniform_onto_active_zones_only() {
+        let p = tmpfile("setnodevol");
+        let mut store = ZoneStore::load(&p).unwrap();
+        // Two zones feeding the same sink; only "kitchen" is on.
+        for name in ["kitchen", "patio"] {
+            store.zones.push(ZoneDef {
+                name: name.into(),
+                links: vec![LinkSpec {
+                    output_port: "Audio/Source|Cap#out:capture_FL".into(),
+                    input_port: "Audio/Sink|Amp#in:playback_FL".into(),
+                }],
+                volumes: vec![],
+            });
+        }
+        store.set_active("kitchen", true).unwrap();
+
+        let changed = store.set_node_volume("Audio/Sink|Amp", 0.85, Some(false));
+        assert!(changed);
+        // Active zone got a uniform spec at the new level...
+        let k = store.get("kitchen").unwrap();
+        assert_eq!(k.volumes.len(), 1);
+        assert_eq!(k.volumes[0].node_key, "Audio/Sink|Amp");
+        assert_eq!(k.volumes[0].volume, Some(0.85));
+        assert!(k.volumes[0].channels.is_empty());
+        // ...the inactive one is untouched (reconcile only asserts active zones).
+        assert!(store.get("patio").unwrap().volumes.is_empty());
+
+        // Survives a round-trip to disk (volume memory).
+        store.save().unwrap();
+        let reloaded = ZoneStore::load(&p).unwrap();
+        assert_eq!(reloaded.get("kitchen").unwrap().volumes[0].volume, Some(0.85));
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn upsert_zone_volume_stores_channels_and_replaces_prior_spec() {
+        let p = tmpfile("upsertzonevol");
+        let mut store = ZoneStore::load(&p).unwrap();
+        store.zones.push(ZoneDef { name: "patio".into(), links: vec![], volumes: vec![] });
+
+        // First write: per-channel at 0.4.
+        assert!(store.upsert_zone_volume("patio", "Audio/Sink|Amp", &[2, 3], 0.4, Some(false)));
+        // Second write to the same node replaces (no duplicate spec).
+        assert!(store.upsert_zone_volume("patio", "Audio/Sink|Amp", &[2, 3], 0.7, Some(true)));
+        let v = &store.get("patio").unwrap().volumes;
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].volume, None);
+        assert!(v[0].muted);
+        assert_eq!(v[0].channels, vec![
+            ChannelVolume { channel: 2, volume: 0.7 },
+            ChannelVolume { channel: 3, volume: 0.7 },
+        ]);
+        // Unknown zone => no-op false.
+        assert!(!store.upsert_zone_volume("ghost", "Audio/Sink|Amp", &[], 0.5, None));
         let _ = std::fs::remove_file(&p);
     }
 
