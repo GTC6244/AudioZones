@@ -29,6 +29,11 @@ pub trait PwBackend: Send + Sync + 'static {
     fn apply(&self, action: Action) -> Result<(), BackendError>;
     /// Subscribe to graph changes; each message is a fresh full snapshot.
     fn subscribe(&self) -> broadcast::Receiver<GraphState>;
+    /// Actively re-read volume/mute state from PipeWire and broadcast a fresh snapshot.
+    /// This is the pull-based counterpart to the push listeners: external changes
+    /// (`wpctl`/GNOME) land on the device's route params and don't reliably emit node
+    /// `Props` events, so they only surface on an explicit rescan. See NEXT_STEPS #3.
+    fn rescan(&self) -> Result<(), BackendError>;
 }
 
 /// In-memory backend with no PipeWire dependency. Lets the whole server compile and
@@ -58,6 +63,13 @@ impl PwBackend for MockBackend {
 
     fn subscribe(&self) -> broadcast::Receiver<GraphState> {
         self.tx.subscribe()
+    }
+
+    fn rescan(&self) -> Result<(), BackendError> {
+        // No live PipeWire to re-read; just re-broadcast the current snapshot so the
+        // refresh path (app -> REST -> WS) is exercisable on the dev/mock setup.
+        let _ = self.tx.send(self.inner.lock().unwrap().clone());
+        Ok(())
     }
 
     fn apply(&self, action: Action) -> Result<(), BackendError> {
@@ -128,8 +140,8 @@ fn seed_graph() -> GraphState {
 
     let source = NodeView {
         ports: vec![
-            PortView { key: port_key(&src, "capture_FL", Direction::Out), name: "capture_FL".into(), direction: Direction::Out },
-            PortView { key: port_key(&src, "capture_FR", Direction::Out), name: "capture_FR".into(), direction: Direction::Out },
+            PortView { key: port_key(&src, "capture_FL", Direction::Out), name: "capture_FL".into(), direction: Direction::Out, channel: Some(0) },
+            PortView { key: port_key(&src, "capture_FR", Direction::Out), name: "capture_FR".into(), direction: Direction::Out, channel: Some(1) },
         ],
         key: src,
         name: "USB Capture".into(),
@@ -151,8 +163,8 @@ fn seed_graph() -> GraphState {
 fn sink(key: &str, name: &str) -> NodeView {
     NodeView {
         ports: vec![
-            PortView { key: port_key(key, "playback_FL", Direction::In), name: "playback_FL".into(), direction: Direction::In },
-            PortView { key: port_key(key, "playback_FR", Direction::In), name: "playback_FR".into(), direction: Direction::In },
+            PortView { key: port_key(key, "playback_FL", Direction::In), name: "playback_FL".into(), direction: Direction::In, channel: Some(0) },
+            PortView { key: port_key(key, "playback_FR", Direction::In), name: "playback_FR".into(), direction: Direction::In, channel: Some(1) },
         ],
         key: key.to_string(),
         name: name.to_string(),
